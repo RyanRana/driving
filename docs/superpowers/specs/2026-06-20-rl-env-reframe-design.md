@@ -188,9 +188,11 @@ Reward and validity come **only** from this verifier.
 |---|---|---|
 | **Compute** (dynamics + collisions + RL) | kinematic JAX (train) / Isaac (hi-fi) | physics + millions of steps |
 | **Geometry / ground truth** | OSM + Cesium World Terrain + Cesium OSM Buildings | real SF roads, hills, buildings |
-| **Render** (the demo) | **Cesium** (browser) / Isaac RTX (cinematic) | fed by per-car poses `(id,t,x,y,z,heading)` |
+| **Render** (the demo) | **Cesium (browser) — primary**; Isaac RTX optional cinematic | fed by per-car poses `(id,t,x,y,z,heading)` |
 
 Cesium is the **render + geometry-source** layer, not a physics engine. Caveat: Cesium tiles serve *visuals*; the *sim* still needs collision/occlusion geometry derived from OSM in the engine's own format.
+
+**The demo renders OFFLINE from logged poses.** This is the key enabler: realistic-physics motion is computed once (can be slow), logged, then Cesium replays it at full framerate. So "many meshed cars with real dynamics on the 3D SF map" is feasible without real-time physics. For very high counts, use an LOD split — hero cars full PhysX, background cars kinematic.
 
 ---
 
@@ -203,7 +205,7 @@ Cesium is the **render + geometry-source** layer, not a physics engine. Caveat: 
 | **Cesium (CesiumJS)** | ground-truth terrain + 3D buildings; **browser demo viewer** |
 | **Kinematic JAX env** | fast coordination-policy **training** substrate |
 | **Isaac Sim / Isaac Lab** | hi-fi physics **execution**; frozen low-level controller training; cinematic render |
-| **WheeledLab** | car asset + dynamics recipe for the frozen low-level controller |
+| **WheeledLab** | **derived recipe** to train the locomotion controller — re-parametrized to **full-size passenger-car** dynamics on Isaac PhysX (not RC scale) |
 | **Cosmos-Predict** | **offline** hard/adversarial scenario generation → curriculum (retires the DIY DDPM) |
 | **Cosmos-Reason** | **secondary** plausibility critic + run QA (never the reward) |
 | **Cosmos-Transfer** | photoreal sim→real demo render |
@@ -213,13 +215,32 @@ Cesium is the **render + geometry-source** layer, not a physics engine. Caveat: 
 
 ---
 
-## 13. Open decisions (to confirm before planning)
+## 13. Hierarchical control (RESOLVED — Config 2) + physics validation
 
-1. **Training substrate** — (A) keep fast kinematic JAX, execute/demo in Isaac *[recommended for hackathon]*; (B) train in Isaac Lab with lightweight kinematic actors at moderate counts; (C) full rigid-body MARL in Isaac *[budget risk]*. "Use Isaac for sims" most naturally means A (Isaac = execution/demo) — **confirm**.
-2. **Elevation source** — USGS 3DEP vs Cesium World Terrain.
-3. **Primary render target** — Cesium browser (always-works) vs Isaac RTX (cinematic) vs both tiers.
-4. **Agents** — shared-weight policy (default) vs heterogeneous per-car parameters.
-5. **Antim** — critical path or stretch (only if OSM geometry isn't varied enough).
+**The goal — "navigate SF without traffic signs" — is carried by the navigation policy.** Two trained policies, cleanly separated:
+
+| Policy | Job | Trained on | Scales to |
+|---|---|---|---|
+| **Navigation / coordination** | route, yield at uncontrolled junctions, avoid crashes, speed & lane → emits **setpoints** | kinematic model **calibrated to the real car's limits** (fast) | many cars (decentralized) |
+| **Locomotion controller** | setpoint → throttle/steer with real dynamics | **single-agent on Isaac PhysX**, full-size passenger-car params, WheeledLab-derived recipe | one car (executed in parallel) |
+
+- **Why both trained:** navigation carries the thesis; realistic locomotion makes the zero-crash claim *credible* (no crashes with **real braking distance / turning radius / hill behavior** is the actual evidence we could replace the traffic system).
+- **Demo:** many cars' navigation outputs run through locomotion + PhysX → poses logged → **Cesium replays offline** (see §11).
+
+### Physics validation (offline model check — separate from the per-run verifier)
+
+Accuracy here means internal correctness + transferability + plausibility (there is no real-car telemetry):
+
+1. **Closed-form unit tests** — integrator vs analytical: constant-accel straight line `s=½at²`; constant-steer arc radius `R = wheelbase/tan δ`; limit clamps hold.
+2. **Kinematic ↔ PhysX tracking gap** *(the transfer-critical metric)* — replay the **same setpoint stream** through both models, measure trajectory divergence. Small gap ⇒ the navigation policy provably transfers to real dynamics.
+3. **Plausibility vs published vehicle constants** — braking distance ≈ `v²/(2µg)`; lateral accel ≤ ~0.9 g; realistic 0–60 and turning radius.
+- *Optional soft screen:* Cosmos-Reason / HUE "physical laws" check flags rollouts that look physically wrong (never the precise verifier).
+
+### Remaining open (minor — defaults assumed)
+
+1. **Elevation source** — USGS 3DEP (default) vs Cesium World Terrain.
+2. **Agents** — shared-weight policy (default) vs heterogeneous per-car parameters.
+3. **Antim** — stretch only (use if OSM geometry isn't varied enough).
 
 ---
 
