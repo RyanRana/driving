@@ -12,6 +12,10 @@ runs/
 # local Mapbox token (not committed)
 smoothride/demo/web/config.js
 
+# local Cesium ion token + generated scene (not committed)
+smoothride/demo/cesium/config.js
+smoothride/demo/cesium/public/
+
 # generated cache & build metadata
 cache/
 *.egg-info/

@@ -42,7 +42,7 @@ async function main() {
   viewer.clock.multiplier = 1.0;
   viewer.timeline.zoomTo(start, stop);
 
-  world.cars.forEach((car, i) => addCar(viewer, car, start, meta));
+  world.cars.forEach((car) => addCar(viewer, car, start, meta));
 
   // HUD
   document.getElementById("cars").textContent = world.summary.cars;
