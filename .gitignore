@@ -19,3 +19,7 @@ smoothride/demo/cesium/public/
 # generated cache & build metadata
 cache/
 *.egg-info/
+
+# local browser-testing artifacts (Cesium viewer smoke screenshots)
+.playwright-mcp/
+smoothride-*.png
