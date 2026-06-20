@@ -6,24 +6,37 @@ and emit a lon/lat FeatureCollection with a `height` property the viewer extrude
 """
 from __future__ import annotations
 
+import math
+
 DEFAULT_HEIGHT = 8.0     # m, ~2-3 storeys when nothing is tagged
 METERS_PER_LEVEL = 3.0
 
 
+def _finite_positive(value) -> float | None:
+    """Parse to a finite, positive float, else None.
+
+    OSMnx returns missing tag columns as float NaN (not None), so a plain
+    `is not None` check lets NaN through -> it serializes to invalid JSON and
+    breaks the viewer. Anything non-finite or <= 0 is treated as "not tagged".
+    """
+    try:
+        f = float(str(value).split()[0])        # strip a trailing unit if present
+    except (ValueError, IndexError, TypeError):
+        return None
+    return f if math.isfinite(f) and f > 0 else None
+
+
 def impute_height(tags: dict) -> float:
-    """explicit `height` -> `building:levels` * 3 m -> DEFAULT_HEIGHT."""
-    h = tags.get("height")
+    """explicit `height` -> `building:levels` * 3 m -> DEFAULT_HEIGHT.
+
+    Always returns a finite, positive height (never NaN/0/negative).
+    """
+    h = _finite_positive(tags.get("height"))
     if h is not None:
-        try:
-            return float(str(h).split()[0])     # strip a trailing unit if present
-        except (ValueError, IndexError):
-            pass
-    lvl = tags.get("building:levels")
+        return h
+    lvl = _finite_positive(tags.get("building:levels"))
     if lvl is not None:
-        try:
-            return float(lvl) * METERS_PER_LEVEL
-        except (ValueError, TypeError):
-            pass
+        return lvl * METERS_PER_LEVEL
     return DEFAULT_HEIGHT
 
 

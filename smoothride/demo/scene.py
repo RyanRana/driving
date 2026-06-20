@@ -120,5 +120,8 @@ def write_scene(path: str, scene: dict) -> int:
     validate_scene(scene)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w") as f:
-        json.dump(scene, f, separators=(",", ":"))
+        # allow_nan=False: NaN/Infinity are invalid JSON (the browser's JSON.parse
+        # rejects them). Fail loudly at export rather than write a scene the viewer
+        # can't load.
+        json.dump(scene, f, separators=(",", ":"), allow_nan=False)
     return os.path.getsize(path)
