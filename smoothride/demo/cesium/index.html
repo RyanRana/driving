@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SmoothRide — SF 3D</title>
+<script src="https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/Cesium.js"></script>
+<link href="https://cesium.com/downloads/cesiumjs/releases/1.118/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+<link href="style.css" rel="stylesheet" />
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div id="hud">
+    <h1>SmoothRide · SF 2040</h1>
+    <div class="row"><span class="k">world</span><span id="world">trained</span></div>
+    <div class="row"><span class="k">cars</span><span id="cars">–</span></div>
+    <div class="row"><span class="k">trips</span><span id="trips" class="ok">0</span></div>
+    <div class="row"><span class="k">crashed</span><span id="crashed" class="bad">0</span></div>
+  </div>
+  <script src="config.js" onerror="window.SMOOTHRIDE_CONFIG={cesiumIonToken:''}"></script>
+  <script src="app.js"></script>
+</body>
+</html>
