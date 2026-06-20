@@ -20,6 +20,8 @@ class RoutePool:
     junc: np.ndarray    # (P, W) bool: waypoint node is a real intersection
     lanes: np.ndarray   # (P, W) int: lane count of the edge LEAVING waypoint w
     speed: np.ndarray   # (P, W) float: speed limit (m/s) of that edge
+    z: np.ndarray       # (P, W) float: terrain elevation at waypoint (m)
+    grade: np.ndarray   # (P, W) float: grade of edge LEAVING waypoint (rise/run)
 
     @property
     def n_routes(self) -> int:
@@ -45,6 +47,10 @@ def build_route_pool(
     def street_count(nid):
         return net.G.nodes[nid].get("street_count", net.G.degree(nid))
 
+    # edge grade lookup keyed by (u_idx, v_idx) into node_xy
+    grade_of = {(int(u), int(v)): float(g)
+                for (u, v), g in zip(net.edges, net.edge_grade)}
+
     P, W = n_routes, max_waypoints
     xy = np.zeros((P, W, 2), np.float32)
     nn = np.zeros((P,), np.int32)
@@ -52,6 +58,8 @@ def build_route_pool(
     junc = np.zeros((P, W), bool)
     lanes = np.ones((P, W), np.int32)
     speed = np.full((P, W), 30.0 / 3.6, np.float32)
+    z = np.zeros((P, W), np.float32)
+    grade = np.zeros((P, W), np.float32)
 
     filled, attempts = 0, 0
     while filled < P and attempts < P * 50:
@@ -71,20 +79,25 @@ def build_route_pool(
             continue
 
         L = len(path)
+        idxs = [idx_of[p] for p in path]
         xy[filled, :L] = wp
         xy[filled, L:] = wp[-1]
         nn[filled] = L
-        node[filled, :L] = [idx_of[p] for p in path]
+        node[filled, :L] = idxs
         node[filled, L:] = idx_of[path[-1]]
         junc[filled, :L] = [street_count(p) >= 3 for p in path]
+        z[filled, :L] = net.node_z[idxs]
+        z[filled, L:] = net.node_z[idxs[-1]]
         for w in range(L - 1):
             data = net.G[path[w]][path[w + 1]][0]
             lanes[filled, w] = _impute_lanes(data.get("lanes"))
             sp = data.get("speed_kph", 30.0)
             sp = float(np.mean(sp)) if isinstance(sp, list) else float(sp)
             speed[filled, w] = sp / 3.6  # km/h -> m/s
+            grade[filled, w] = grade_of.get((idxs[w], idxs[w + 1]), 0.0)
         lanes[filled, L - 1:] = lanes[filled, max(L - 2, 0)]
         speed[filled, L - 1:] = speed[filled, max(L - 2, 0)]
+        grade[filled, L - 1:] = grade[filled, max(L - 2, 0)]
         filled += 1
 
     if filled == 0:
@@ -98,8 +111,11 @@ def build_route_pool(
         junc = np.tile(junc[sl], (reps, 1))[:P]
         lanes = np.tile(lanes[sl], (reps, 1))[:P]
         speed = np.tile(speed[sl], (reps, 1))[:P]
+        z = np.tile(z[sl], (reps, 1))[:P]
+        grade = np.tile(grade[sl], (reps, 1))[:P]
 
-    return RoutePool(xy=xy, n=nn, node=node, junc=junc, lanes=lanes, speed=speed)
+    return RoutePool(xy=xy, n=nn, node=node, junc=junc, lanes=lanes, speed=speed,
+                     z=z, grade=grade)
 
 
 if __name__ == "__main__":

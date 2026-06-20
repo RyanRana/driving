@@ -1,0 +1,36 @@
+{
+  "id": "cesium",
+  "name": "CesiumJS 3D viewer (meshed cars on 3D SF)",
+  "layer": "viz",
+  "kind": "glue-code",
+  "role": "The headline 3D deliverable: replay logged car poses as meshed cars driving the real 3D San Francisco — Cesium World Terrain (hills) + Cesium OSM Buildings — with a time-dynamic clock and a verifier-driven HUD.",
+  "status": "built",
+  "built": "smoothride/demo/export_cesium.py packs per-car (lon,lat,height,heading,speed,crash) + the deterministic verifier summary into trajectories.json (no geometry baked in). smoothride/demo/cesium/ (index.html, app.js, config.example.js) renders box-meshed cars draped onto Cesium terrain (heights sampled from the live terrain provider), oriented by velocity, colored by speed, with a graceful no-token fallback. Runs offline over a static http server.",
+  "language": "Python (export) + JS (CesiumJS via CDN)",
+  "inputs": [
+    "logged rollout trace (smoothride/env/trace.py)",
+    "verifier summary (smoothride/eval/verifier.py)",
+    "Cesium ion token (free) for terrain + 3D buildings"
+  ],
+  "outputs": [
+    "trajectories.json (per-car poses + verifier summary)",
+    "browser replay of meshed cars on 3D SF terrain + buildings"
+  ],
+  "upstream": ["kinematic-env", "terrain-dem", "buildings", "verifier"],
+  "downstream": [],
+  "render_vs_sim": "Cesium DRAWS the world (terrain + buildings stream from ion); it never computes dynamics or collisions. The compute layer emits poses, the verifier judges them, Cesium only renders.",
+  "risks": [
+    "needs a free Cesium ion token -> config.example.js + graceful fallback message",
+    "orthometric DEM z vs ellipsoidal terrain -> sample Cesium terrain at runtime (fallback: z - geoid)",
+    "must be served over http (fetch fails on file://)"
+  ],
+  "run": [
+    "python -m smoothride.demo.export_cesium",
+    "cp smoothride/demo/cesium/config.example.js smoothride/demo/cesium/config.js  # paste ion token",
+    "python -m http.server 8000  ->  http://localhost:8000/smoothride/demo/cesium/"
+  ],
+  "sources": [
+    "https://cesium.com/platform/cesiumjs/",
+    "https://ion.cesium.com/tokens"
+  ]
+}

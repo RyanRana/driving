@@ -4,13 +4,15 @@ __pycache__/
 data_cache/*.graphml
 data_cache/*.parquet
 data_cache/*.gpkg
+data_cache/*.tif
 checkpoints/
 runs/
 *.log
 .DS_Store
 
-# local Mapbox token (not committed)
+# local viewer tokens (not committed)
 smoothride/demo/web/config.js
+smoothride/demo/cesium/config.js
 
 # generated cache & build metadata
 cache/

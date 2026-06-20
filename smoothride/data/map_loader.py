@@ -9,7 +9,7 @@ bicycle model and collision footprints can work in real-world units.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import networkx as nx
 import numpy as np
@@ -34,6 +34,17 @@ class RoadNetwork:
     edge_speed_kph: np.ndarray      # (E,) speed limit (imputed where missing)
     G: nx.MultiDiGraph              # the projected graph (for routing / Dijkstra)
     origin: tuple[float, float]     # (x0, y0) subtracted to keep coords small
+    bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)  # lon/lat WSEN
+    # 3D ground truth (populated by data.terrain.add_terrain; zeros => flat 2D).
+    node_z: np.ndarray = field(default=None)        # (N,) elevation, meters
+    edge_grade: np.ndarray = field(default=None)    # (E,) rise/run, clipped
+
+    def __post_init__(self):
+        # Terrain is optional: default to a flat world so the 2D path is unchanged.
+        if self.node_z is None:
+            self.node_z = np.zeros(len(self.node_xy), np.float32)
+        if self.edge_grade is None:
+            self.edge_grade = np.zeros(len(self.edges), np.float32)
 
     @property
     def n_nodes(self) -> int:
@@ -87,7 +98,10 @@ def _impute_lanes(raw) -> int:
         return 1
 
 
-def to_road_network(G: nx.MultiDiGraph) -> RoadNetwork:
+def to_road_network(
+    G: nx.MultiDiGraph,
+    bbox: tuple[float, float, float, float] = DOWNTOWN_SF_BBOX,
+) -> RoadNetwork:
     """Project to a metric CRS and flatten into simulation-ready arrays."""
     Gp = ox.project_graph(G)  # auto-picks a UTM zone -> coords in meters
 
@@ -115,12 +129,40 @@ def to_road_network(G: nx.MultiDiGraph) -> RoadNetwork:
         edge_speed_kph=np.array(speed, float),
         G=Gp,
         origin=origin,
+        bbox=tuple(bbox),
     )
 
 
-def load_road_network(**kwargs) -> RoadNetwork:
+def load_road_network(
+    bbox: tuple[float, float, float, float] = DOWNTOWN_SF_BBOX, **kwargs,
+) -> RoadNetwork:
     """Convenience: pull (or load cached) SF graph and return a RoadNetwork."""
-    return to_road_network(load_sf_graph(**kwargs))
+    return to_road_network(load_sf_graph(bbox=bbox, **kwargs), bbox=bbox)
+
+
+def load_road_network_3d(
+    bbox: tuple[float, float, float, float] = DOWNTOWN_SF_BBOX,
+    resolution: int = 10,
+    with_buildings: bool = True,
+    refresh: bool = False,
+    **kwargs,
+):
+    """Compose graph + terrain (+ buildings) into a 3D-ready world.
+
+    Returns `(net, buildings)` where `net` has `node_z`/`edge_grade` populated
+    and `buildings` is a `BuildingSet` (or None if `with_buildings=False` or the
+    OSM pull fails). Terrain/buildings both degrade gracefully when offline.
+    """
+    from .terrain import add_terrain
+
+    net = load_road_network(bbox=bbox, refresh=refresh, **kwargs)
+    add_terrain(net, resolution=resolution, refresh=refresh)
+
+    buildings = None
+    if with_buildings:
+        from .buildings import load_building_set
+        buildings = load_building_set(net, refresh=refresh)
+    return net, buildings
 
 
 if __name__ == "__main__":

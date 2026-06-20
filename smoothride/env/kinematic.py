@@ -20,7 +20,7 @@ import flax.struct as struct
 import jax
 import jax.numpy as jnp
 
-from . import spatial
+from . import perception, spatial
 from .routing import RoutePool
 
 
@@ -33,6 +33,9 @@ class Env:
     routes_lanes: jnp.ndarray
     routes_speed: jnp.ndarray
     routes_cum: jnp.ndarray     # (P, W) cumulative arc length (for spread spawning)
+    routes_z: jnp.ndarray       # (P, W) terrain elevation at each waypoint (m)
+    routes_grade: jnp.ndarray   # (P, W) grade of edge leaving each waypoint
+    bld_segs: jnp.ndarray       # (S, 2, 2) building wall segments (occluders)
     world_min: jnp.ndarray
     world_max: jnp.ndarray
 
@@ -51,6 +54,9 @@ class Env:
     accel_max: float = struct.field(pytree_node=False, default=3.0)
     steer_max: float = struct.field(pytree_node=False, default=0.5)
     wheelbase: float = struct.field(pytree_node=False, default=2.7)
+    # gravity component along a slope: net accel = command - grade_accel*grade.
+    # ~g so a 30% hill costs ~3 m/s^2 (comparable to accel_max) — SF-real.
+    grade_accel: float = struct.field(pytree_node=False, default=9.81)
     lane_width: float = struct.field(pytree_node=False, default=3.5)
     wp_radius: float = struct.field(pytree_node=False, default=9.0)
     # collision_radius MUST be < lane_width, else adjacent-lane cars "collide"
@@ -61,6 +67,11 @@ class Env:
     lead_cone: float = struct.field(pytree_node=False, default=30.0)
     junc_zone: float = struct.field(pytree_node=False, default=14.0)
     idle_speed: float = struct.field(pytree_node=False, default=0.5)
+    # CMDP objective: reward = efficiency (minimize travel time). Crashes/rules
+    # are a *constraint cost* channel (info["cost"]), not reward terms — the
+    # PPO-Lagrangian trainer consumes that channel with an adaptive multiplier.
+    w_time: float = struct.field(pytree_node=False, default=0.1)
+    offroad_margin: float = struct.field(pytree_node=False, default=2.0)
     w_progress: float = struct.field(pytree_node=False, default=1.0)
     w_idle: float = struct.field(pytree_node=False, default=0.05)
     w_prox: float = struct.field(pytree_node=False, default=1.0)
@@ -72,7 +83,9 @@ class Env:
 
     @property
     def obs_dim(self) -> int:
-        return 6 + 1 + self.k_neighbors * 4 + 3
+        # ego(6) + lane_frac(1) + K neighbors(4 each) + pedestrian(3)
+        #   + grade(1, Phase 2) + nearest-building distance(1, Phase 3)
+        return 6 + 1 + self.k_neighbors * 4 + 3 + 1 + 1
 
     @property
     def act_dim(self) -> int:
@@ -84,6 +97,7 @@ class State:
     pos: jnp.ndarray
     heading: jnp.ndarray
     speed: jnp.ndarray
+    z: jnp.ndarray             # (N,) draped terrain height (sampled from route)
     route_idx: jnp.ndarray
     wp_ptr: jnp.ndarray
     lane: jnp.ndarray
@@ -176,6 +190,9 @@ def _observe(env: Env, st: State, cand) -> jnp.ndarray:
     _, kk = jax.lax.top_k(-cd, env.k_neighbors)             # (N,K) into candidate axis
     nbr = jnp.take_along_axis(cand, kk, axis=1)             # (N,K) agent idx
     nbr_valid = jnp.take_along_axis(valid, kk, axis=1)
+    # 3D perception: drop neighbors hidden behind a building (no see-through).
+    occluded = perception.occlusion_mask(st.pos, st.pos[nbr], env.bld_segs)
+    nbr_valid = nbr_valid & ~occluded
     c, s = jnp.cos(-st.heading), jnp.sin(-st.heading)
     nrel = st.pos[nbr] - st.pos[:, None, :]
     nx = (nrel[..., 0] * c[:, None] - nrel[..., 1] * s[:, None]) * nbr_valid
@@ -199,7 +216,14 @@ def _observe(env: Env, st: State, cand) -> jnp.ndarray:
     ped_feat = jnp.stack([jnp.clip(px / 50, -1, 1), jnp.clip(py / 50, -1, 1),
                           jnp.clip(pmin / 50, 0, 1)], -1)
 
-    return jnp.concatenate([ego, lane_frac[:, None], nbr_feat, ped_feat], -1)
+    # 3D scalars: road grade ahead (signed) + distance to nearest building wall
+    grade = env.routes_grade[st.route_idx, st.wp_ptr]
+    grade_feat = jnp.clip(grade / 0.35, -1, 1)[:, None]
+    bld_dist = perception.nearest_building_dist(st.pos, env.bld_segs)
+    bld_feat = jnp.clip(bld_dist / 50.0, 0, 1)[:, None]
+
+    return jnp.concatenate(
+        [ego, lane_frac[:, None], nbr_feat, ped_feat, grade_feat, bld_feat], -1)
 
 
 def _ped_step(env: Env, st: State, key):
@@ -220,8 +244,9 @@ def reset(env: Env, key: jax.Array):
     n = env.n_agents
     route_idx = jax.random.randint(kr, (n,), 0, env.routes_xy.shape[0])
     pos, heading, wp = _entry_spawn(env, route_idx, kf)
+    z = env.routes_z[route_idx, wp]
     st = State(
-        pos=pos, heading=heading, speed=jnp.zeros(n),
+        pos=pos, heading=heading, speed=jnp.zeros(n), z=z,
         route_idx=route_idx, wp_ptr=wp, lane=jnp.zeros(n, jnp.int32),
         just_crashed=jnp.zeros(n, bool), crashes=jnp.zeros(n, jnp.int32),
         spawn_grace=jnp.zeros(n, jnp.int32), goals=jnp.zeros(n, jnp.int32),
@@ -237,9 +262,15 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
     N = env.n_agents
     kidx, kfrac, kped = jax.random.split(key, 3)
 
-    accel = jnp.clip(action[:, 0], -1, 1) * env.accel_max
+    accel_cmd = jnp.clip(action[:, 0], -1, 1) * env.accel_max
     delta = jnp.clip(action[:, 1], -1, 1) * env.steer_max
     lane_cmd = action[:, 2]
+
+    # grade-aware dynamics: gravity along the slope subtracts from commanded accel
+    # -> uphill saps acceleration / top speed, downhill adds speed and LENGTHENS
+    # braking. Cheap scalar (2.5D); full tire/suspension physics is the Isaac layer.
+    grade = env.routes_grade[st.route_idx, st.wp_ptr]
+    accel = accel_cmd - env.grade_accel * grade
 
     vmax = jnp.minimum(env.v_max, env.routes_speed[st.route_idx, st.wp_ptr])
     speed = jnp.clip(st.speed + accel * env.dt, 0.0, vmax)
@@ -256,6 +287,13 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
     dist = jnp.linalg.norm(to_wp, axis=-1)
     herr = _wrap(jnp.arctan2(to_wp[:, 1], to_wp[:, 0]) - heading)
     progress = speed * jnp.cos(herr) * env.dt
+
+    # lateral deviation from the lane centerline (perpendicular to route dir) —
+    # the off-road signal. `dist` above is to the next waypoint (longitudinal),
+    # so it can't double as off-road.
+    dn, _ = _route_dir(env, st.route_idx, st.wp_ptr)
+    right = jnp.stack([dn[:, 1], -dn[:, 0]], axis=-1)
+    lateral = jnp.abs(jnp.sum((pos - tgt) * right, axis=-1))
 
     n_wp = env.routes_n[st.route_idx]
     hit = dist < env.wp_radius
@@ -305,40 +343,61 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
     goals = st.goals + new_goal.astype(jnp.int32)
     crashes = st.crashes + crash_event.astype(jnp.int32)
     ped_pos, ped_dir = _ped_step(env, st, kped)
+    z = env.routes_z[route_idx, wp_ptr]
 
-    idle_pen = (speed < env.idle_speed)
+    # --- CONSTRAINT COST CHANNEL (CMDP) -----------------------------------
+    # Dense per-agent cost on the offending transition (never discard the run).
+    # off_road = drifted beyond the full road half-width from the lane centerline.
+    half_road = 0.5 * env.lane_width * L.astype(jnp.float32) + env.offroad_margin
+    off_road = (lateral > half_road) & ~respawn
+    c_crash = crash_event.astype(jnp.float32)
+    c_offroad = off_road.astype(jnp.float32)
+    c_rule = yield_pen
+    cost = c_crash + c_offroad + c_rule          # (N,) per-agent constraint cost
+
+    # --- EFFICIENCY REWARD ------------------------------------------------
+    # minimize travel time: pay dt each step until arrival, bonus on arrival.
+    # progress kept as a light warm-up shaping term.
+    active = ~respawn
     reward = (
-        env.w_progress * progress
-        - env.w_idle * idle_pen.astype(jnp.float32)
-        - env.w_prox * prox_pen - env.w_ped_prox * ped_prox
-        - env.w_yield * yield_pen
-        - env.w_collision * car_crash.astype(jnp.float32)
-        - env.w_ped * ped_hit.astype(jnp.float32)
-        + env.w_goal * new_goal.astype(jnp.float32)
+        env.w_goal * new_goal.astype(jnp.float32)
+        - env.w_time * env.dt * active.astype(jnp.float32)
+        + env.w_progress * progress
     )
 
     t = st.t + 1
-    nst = State(pos=pos, heading=heading, speed=speed, route_idx=route_idx,
+    nst = State(pos=pos, heading=heading, speed=speed, z=z, route_idx=route_idx,
                 wp_ptr=wp_ptr, lane=lane, just_crashed=crash_event, crashes=crashes,
                 spawn_grace=jnp.where(respawn, 4, jnp.maximum(st.spawn_grace - 1, 0)),
                 goals=goals, ped_pos=ped_pos, ped_dir=ped_dir, t=t)
     info = {"just_crashed": crash_event, "crashes": crashes,
             "goals": goals, "total_goals": goals.sum(),
             "crashes_per_car": crashes.mean(), "ped_hits": ped_hit.sum(),
-            "mean_speed": jnp.mean(speed)}
+            "mean_speed": jnp.mean(speed),
+            # CMDP constraint channel (per-agent, dense)
+            "cost": cost, "cost_crash": c_crash, "cost_offroad": c_offroad,
+            "cost_rule": c_rule, "arrived": new_goal}
     return nst, _observe(env, nst, _candidates(env, pos)), reward, t >= env.max_steps, info
 
 
-def make_env(pool: RoutePool, world_min, world_max, cell_size=35.0, cap=16, **kw) -> Env:
+def make_env(pool: RoutePool, world_min, world_max, cell_size=35.0, cap=16,
+             buildings=None, **kw) -> Env:
+    """`buildings` is an optional data.buildings.BuildingSet — its wall segments
+    become the occluders the perception layer ray-casts against. None => no
+    occluders (every neighbor visible), so the 2D path is unchanged."""
     import numpy as np
     seg = np.linalg.norm(np.diff(pool.xy, axis=1), axis=-1)          # (P, W-1)
     cum = np.concatenate([np.zeros((pool.xy.shape[0], 1)), np.cumsum(seg, axis=1)], 1)
     ncx, ncy = spatial.grid_dims(world_min, world_max, cell_size)
+    bld_segs = (buildings.segments if buildings is not None
+                else np.zeros((0, 2, 2), np.float32))
     return Env(
         routes_xy=jnp.asarray(pool.xy), routes_n=jnp.asarray(pool.n),
         routes_node=jnp.asarray(pool.node), routes_junc=jnp.asarray(pool.junc),
         routes_lanes=jnp.asarray(pool.lanes), routes_speed=jnp.asarray(pool.speed),
         routes_cum=jnp.asarray(cum, jnp.float32),
+        routes_z=jnp.asarray(pool.z), routes_grade=jnp.asarray(pool.grade),
+        bld_segs=jnp.asarray(bld_segs, jnp.float32),
         world_min=jnp.asarray(world_min, jnp.float32),
         world_max=jnp.asarray(world_max, jnp.float32),
         cell_size=cell_size, cap=cap, ncx=ncx, ncy=ncy,

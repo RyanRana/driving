@@ -21,20 +21,24 @@ is identical in the kinematic env and in Isaac.
 | Layer | Component | Status | One-liner |
 |---|---|---|---|
 | data-map | **OSMnx** | ✅ | SF drivable road graph from OSM (training + routing + demo geometry) |
+| data-map | **terrain-dem** (py3dep / USGS 3DEP) | ✅ | DEM → node `z` + per-edge grade (2.5D world, real SF hills) |
+| data-map | **buildings** (OSMnx footprints) | ✅ | 3D occluders for line-of-sight perception + heights |
 | data-map | **OSM proximity** (Overpass/features/Nominatim) | ➕ | real "near schools / what's near (lat,lng)" → reward caution zones |
 | data-map | **Traffic data** (PeMS/AADT/LODES) | ➕ | seed #cars & density; freeway counts are the only live source |
-| simulation | **kinematic-env** (JAX) | ➕ | the training substrate — many cars on the real graph, vectorized |
+| simulation | **kinematic-env** (JAX) | ✅ | training substrate — many cars on the real graph, 3D (z/grade/occlusion) |
 | rl | **MARL** (JaxMARL/PettingZoo + MAPPO/IPPO) | ➕ | CTDE coordination policy → setpoint actions ("one continuous model") |
-| rl | **reward-system** | ➕ | no-crash ≫ keep-moving > shortest-path > smooth turns; curriculum weights |
+| rl | **reward-system / CMDP** | ✅ | reward = travel time; crash/off-road/rule = dense constraint cost channel |
+| eval | **verifier** (pure trace fn) | ✅ | deterministic geometric judge — same trace → same verdict |
 | compute | **Modal** | ✅ | GPU training: rollout workers + learner + checkpoints (any GPU) |
 | simulation | **lowlevel-controller** (WheeledLab-derived) | ➕ | frozen setpoint→steering/throttle; trained once, runs in Isaac |
 | simulation | **WheeledLab** | ✅ | car asset (MuSHR/HOUND) + dynamics recipe to train the controller |
 | simulation | **Isaac Lab** | ✅ | execution/demo only — rigid-body hero shot (RTX/L40S box) |
 | simulation | **road-mesh-builder** | ⛔gap | OSM→drivable geometry for the Isaac demo (demo-only, keep cheap) |
-| viz | **viz-demo** | ⛔gap | untrained gridlock vs trained smooth flow on the real SF map |
+| viz | **cesium** (3D viewer) | ✅ | meshed cars on real 3D SF (terrain + OSM buildings), offline replay |
+| viz | **viz-demo** (deck.gl 2D) | ✅ | untrained gridlock vs trained smooth flow on the real SF map |
 
-Critical path:
-`OSMnx → kinematic-env → MARL (+reward) → Modal → trained policy → lowlevel-controller → Isaac → viz`
+Critical path (3D):
+`OSMnx + terrain-dem + buildings → kinematic-env (3D) → MARL/CMDP → trace → verifier → export_cesium → Cesium`
 
 ## The honesty check (your three questions)
 
