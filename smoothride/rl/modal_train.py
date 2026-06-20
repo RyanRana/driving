@@ -1,0 +1,130 @@
+"""Modal app: run the JAX nav-policy (MAPPO) training on a datacenter GPU.
+
+Unlike the Isaac/PhysX low-level controller (see smoothride/lowlevel/modal_image.py),
+the kinematic env + MAPPO learner are pure JAX — jit + vmap over many worlds on a
+SINGLE device. So this needs only a light JAX image (no Isaac), and rollouts +
+the PPO-Lagrangian update stay co-resident on one GPU (do NOT split rollout
+workers from the learner — that's how the vmap design gets its throughput; see
+docs/superpowers/specs/2026-06-20-sim-hosting.md).
+
+Checkpoints persist to a modal.Volume so export_cesium / render pull them back.
+
+One-time:
+  pip install modal && modal token new
+
+Run a scaled training (heavy density example):
+  modal run -m smoothride.rl.modal_train --iters 400 --worlds 64 --agents 96 --peds 32
+
+Pull the trained policy back for rendering:
+  modal volume get smoothride-nav-ckpts trained.msgpack runs/trained.msgpack
+  modal volume get smoothride-nav-ckpts untrained.msgpack runs/untrained.msgpack
+  python -m smoothride.demo.export_cesium --elevation synthetic --agents 96 \
+      --out smoothride/demo/cesium/public/scene.json
+
+The training loop here mirrors smoothride/rl/train_local.py::main, but writes to
+the persistent volume and reports per-iter metrics in the Modal logs.
+"""
+from __future__ import annotations
+
+import modal
+
+APP_NAME = "smoothride-nav"
+GPU = "A100"                  # H100 also fine; the env is light, A100 is plenty
+TIMEOUT_S = 4 * 60 * 60
+CKPT_DIR = "/ckpts"
+
+app = modal.App(APP_NAME)
+
+# Trained/untrained params persist here across runs (resume + export read from it).
+volume = modal.Volume.from_name("smoothride-nav-ckpts", create_if_missing=True)
+
+# Light JAX image — just the nav stack, no Isaac. Source is added at runtime so
+# editing the trainer doesn't rebuild the image.
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install(
+        "jax[cuda12]>=0.4.30", "flax>=0.8", "optax>=0.2",
+        "osmnx>=2.0", "networkx>=3.0", "shapely>=2.0", "geopandas>=1.0",
+        "pandas>=2.0", "numpy>=1.26", "pyproj>=3.6",
+    )
+    .add_local_python_source("smoothride")
+)
+
+
+@app.function(image=image, gpu=GPU, timeout=TIMEOUT_S, volumes={CKPT_DIR: volume})
+def train(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
+          steps: int = 300, vmax: float = 16.0, routes: int = 1024,
+          lagrangian: bool = True, crash_target: float = 0.3, seed: int = 0,
+          tag: str = "") -> dict:
+    """Train the shared-weight nav policy; write {untrained,trained}{tag}.msgpack
+    to the volume. Returns the final-iteration metrics dict."""
+    import json
+    import os
+    import time
+
+    import jax
+    from flax import serialization
+
+    from smoothride.data.map_loader import load_road_network
+    from smoothride.env import kinematic as K
+    from smoothride.env.routing import build_route_pool
+    from smoothride.rl import ppo
+
+    def save(ts, name: str) -> None:
+        with open(os.path.join(CKPT_DIR, name), "wb") as f:
+            f.write(serialization.to_bytes(ts.params))
+
+    net = load_road_network()                       # pulls + caches the SF graph
+    x0, y0, x1, y1 = net.bounds()
+    pool = build_route_pool(net, n_routes=routes, seed=seed)
+    # Lagrangian: zero the fixed crash penalty so the adaptive multiplier owns it.
+    extra = {"w_collision": 0.0} if lagrangian else {}
+    env = K.make_env(pool, (x0, y0), (x1, y1), n_agents=agents, n_peds=peds,
+                     max_steps=steps, v_max=vmax, **extra)
+    cfg = ppo.PPOConfig(n_worlds=worlds)
+    print(f"device={jax.devices()} env: agents={env.n_agents} obs={env.obs_dim} "
+          f"steps={env.max_steps} worlds={cfg.n_worlds}", flush=True)
+
+    key = jax.random.PRNGKey(seed)
+    key, kinit = jax.random.split(key)
+    ts = ppo.make_train_state(env, cfg, kinit)
+    save(ts, f"untrained{tag}.msgpack")             # baseline shadow world
+    volume.commit()
+
+    history, lam = [], 10.0
+    for it in range(iters):
+        key, kc = jax.random.split(key)
+        t0 = time.time()
+        batch = ppo.collect(env, ts, kc, cfg.n_worlds)
+        ts, m = ppo.update(env, cfg, ts, batch, lam if lagrangian else 0.0)
+        m = {k: float(v) for k, v in m.items()}
+        m["iter"], m["sec"] = it, round(time.time() - t0, 2)
+        if lagrangian:                              # dual ascent toward the target
+            lam = min(400.0, max(0.0, lam + 3.0 * (m["crashes_per_car"] - crash_target)))
+            m["lam"] = round(lam, 1)
+        history.append(m)
+        if it % 10 == 0 or it == iters - 1:
+            lam_s = f"lam {lam:6.1f} | " if lagrangian else ""
+            print(f"it {it:4d} | reward {m['ep_reward']:8.1f} | {lam_s}"
+                  f"crashes/car {m['crashes_per_car']:.2f} | "
+                  f"goals/agent {m['goals_per_agent']:.2f} | {m['sec']}s", flush=True)
+            save(ts, f"trained{tag}.msgpack")        # periodic, so renders mid-run
+            with open(os.path.join(CKPT_DIR, f"history{tag}.json"), "w") as f:
+                json.dump(history, f)
+            volume.commit()
+
+    save(ts, f"trained{tag}.msgpack")
+    with open(os.path.join(CKPT_DIR, f"history{tag}.json"), "w") as f:
+        json.dump(history, f)
+    volume.commit()
+    print(f"done: untrained{tag}.msgpack, trained{tag}.msgpack -> volume "
+          f"{APP_NAME}-ckpts", flush=True)
+    return history[-1]
+
+
+@app.local_entrypoint()
+def main(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
+         steps: int = 300, lagrangian: bool = True, tag: str = ""):
+    metrics = train.remote(iters=iters, worlds=worlds, agents=agents, peds=peds,
+                           steps=steps, lagrangian=lagrangian, tag=tag)
+    print("final metrics:", metrics)
