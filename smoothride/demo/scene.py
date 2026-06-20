@@ -22,6 +22,9 @@ import numpy as np
 
 SCHEMA_VERSION = 1
 _CAR_KEYS = {"lng", "lat", "z", "hdg", "spd", "crash"}
+_META_KEYS = {"dt", "n_steps", "vmax", "center", "bounds"}
+_WORLD_KEYS = {"summary", "trips_series", "cars", "peds"}
+_SUMMARY_KEYS = {"cars", "crashed_end"}
 
 
 def pack_world(*, car_lon, car_lat, car_z, heading, speed, crashed, goals,
@@ -72,18 +75,44 @@ def build_scene(*, meta: dict, roads: list, buildings: dict, worlds: dict) -> di
 
 
 def validate_scene(scene: dict) -> None:
-    """Raise ValueError if `scene` does not conform to schema v1."""
+    """Raise ValueError if `scene` does not conform to schema v1.
+
+    This is THE contract: any sim backend (kinematic now, Isaac/PhysX later) must
+    emit a scene that passes here, and a scene that passes here must be renderable
+    by the viewer. So we enforce every field the viewer actually reads — a loose
+    validator that lets `meta: {}` through would fail silently in the browser.
+    """
     if scene.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {SCHEMA_VERSION}, "
                          f"got {scene.get('schema_version')!r}")
     for key in ("meta", "worlds"):
         if key not in scene:
             raise ValueError(f"scene missing required key: {key!r}")
+
+    missing_meta = _META_KEYS - set(scene["meta"])
+    if missing_meta:
+        raise ValueError(f"meta missing keys: {sorted(missing_meta)}")
+
+    if not scene["worlds"]:
+        raise ValueError("scene has no worlds")
+
     for wname, world in scene["worlds"].items():
-        for car in world.get("cars", []):
+        missing_world = _WORLD_KEYS - set(world)
+        if missing_world:
+            raise ValueError(f"world {wname!r} missing keys: {sorted(missing_world)}")
+        missing_summary = _SUMMARY_KEYS - set(world["summary"])
+        if missing_summary:
+            raise ValueError(f"world {wname!r} summary missing keys: "
+                             f"{sorted(missing_summary)}")
+        for car in world["cars"]:
             missing = _CAR_KEYS - set(car)
             if missing:
                 raise ValueError(f"world {wname!r} car missing keys: {sorted(missing)}")
+            n = len(car["lng"])
+            uneven = {k: len(car[k]) for k in _CAR_KEYS if len(car[k]) != n}
+            if uneven:
+                raise ValueError(f"world {wname!r} car has uneven frame counts "
+                                 f"(lng={n}): {uneven}")
 
 
 def write_scene(path: str, scene: dict) -> int:

@@ -42,12 +42,16 @@ def run(out: str, agents: int = 12, peds: int = 6, steps: int = 60, seed: int = 
     env = K.make_env(pool, (x0, y0), (x1, y1), n_agents=agents, n_peds=peds, max_steps=steps)
     tf = _lonlat_transformer(net)
 
+    stride = 1
     rollouts = {"trained": _random_rollout(env, jax.random.PRNGKey(seed), steps)}
-    worlds = build_from_rollouts(net, env, tf, rollouts, stride=1)
+    worlds = build_from_rollouts(net, env, tf, rollouts, stride=stride)
 
     corners = np.array([[x0, y0], [x1, y1]], np.float32)
     clon, clat = _to_lonlat(net, tf, corners)
-    meta = {"dt": float(env.dt), "n_steps": steps, "vmax": float(env.v_max),
+    # n_steps = kept-frame count, derived the same way pack_world/export_cesium do,
+    # so meta.n_steps can never drift from the per-car array lengths the viewer iterates.
+    n_steps = len(range(0, steps, stride))
+    meta = {"dt": float(env.dt), "n_steps": n_steps, "vmax": float(env.v_max),
             "center": [round(float(clon.mean()), 6), round(float(clat.mean()), 6)],
             "bounds": [[round(float(clon[0]), 6), round(float(clat[0]), 6)],
                        [round(float(clon[1]), 6), round(float(clat[1]), 6)]],
