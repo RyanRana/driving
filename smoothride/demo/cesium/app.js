@@ -14,9 +14,21 @@ async function main() {
     terrainProvider: hasToken
       ? await Cesium.createWorldTerrainAsync()
       : new Cesium.EllipsoidTerrainProvider(),
+    // baseLayer:false => no default Cesium-ion imagery (which 401s without a
+    // token). Without a token we drape free OpenStreetMap tiles instead, so the
+    // real SF street grid is visible offline; with a token, ion world imagery.
+    baseLayer: hasToken ? undefined : false,
     animation: true, timeline: true, baseLayerPicker: false, geocoder: false,
   });
   viewer.scene.globe.depthTestAgainstTerrain = true;
+  window.viewer = viewer;   // handy for console debugging (single-viewer app)
+
+  if (!hasToken) {
+    viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider({
+      url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      maximumLevel: 19, credit: "© OpenStreetMap contributors",
+    }));
+  }
 
   const scene = await (await fetch("public/scene.json")).json();
   if (scene.schema_version !== 1) throw new Error("unsupported schema " + scene.schema_version);
@@ -53,10 +65,17 @@ async function main() {
   });
   document.getElementById("crashed").textContent = world.summary.crashed_end;
 
-  // Frame the city.
-  viewer.camera.flyTo({
-    destination: Cesium.Cartesian3.fromDegrees(meta.center[0], meta.center[1], 1800),
-    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-45), roll: 0 },
+  // Frame the city: fit the scene's bounding sphere with a fixed oblique tilt, so
+  // the whole street grid fills the view at any bbox size (a fixed-altitude flyTo
+  // leaves a small city as a speck under a horizon of the rest of the state).
+  // bounds is [[wLon,sLat],[eLon,nLat]] (SW, NE).
+  const [[wLon, sLat], [eLon, nLat]] = meta.bounds;
+  const sphere = Cesium.BoundingSphere.fromPoints([
+    Cesium.Cartesian3.fromDegrees(wLon, sLat),
+    Cesium.Cartesian3.fromDegrees(eLon, nLat),
+  ]);
+  viewer.camera.flyToBoundingSphere(sphere, {
+    offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), sphere.radius * 2.4),
     duration: 0,
   });
 }
@@ -97,7 +116,7 @@ function drawRoads(viewer, roads) {
       polyline: {
         positions: Cesium.Cartesian3.fromDegreesArrayHeights(
           [seg[0][0], seg[0][1], seg[0][2], seg[1][0], seg[1][1], seg[1][2]]),
-        width: 2, material: Cesium.Color.fromCssColorString("#3a4658"),
+        width: 3, material: Cesium.Color.fromCssColorString("#22d3ee").withAlpha(0.9),
         clampToGround: false,
       },
     });
