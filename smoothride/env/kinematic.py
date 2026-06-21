@@ -87,13 +87,17 @@ class State:
     route_idx: jnp.ndarray
     wp_ptr: jnp.ndarray
     lane: jnp.ndarray
-    just_crashed: jnp.ndarray  # (N,) bool: collided THIS step (then respawns)
+    just_crashed: jnp.ndarray  # (N,) bool: collided THIS step (terminal: car freezes)
     crashes: jnp.ndarray       # (N,) int: cumulative collisions
     spawn_grace: jnp.ndarray   # (N,) int: countdown of merge-in immunity steps
+    arrived: jnp.ndarray       # (N,) bool: reached destination (LATCHES; car freezes)
     goals: jnp.ndarray
     ped_pos: jnp.ndarray
     ped_dir: jnp.ndarray
     t: jnp.ndarray
+
+
+SPAWN_GRACE = 4   # steps of collision immunity after entering the map
 
 
 def _wrap(a):
@@ -224,7 +228,11 @@ def reset(env: Env, key: jax.Array):
         pos=pos, heading=heading, speed=jnp.zeros(n),
         route_idx=route_idx, wp_ptr=wp, lane=jnp.zeros(n, jnp.int32),
         just_crashed=jnp.zeros(n, bool), crashes=jnp.zeros(n, jnp.int32),
-        spawn_grace=jnp.zeros(n, jnp.int32), goals=jnp.zeros(n, jnp.int32),
+        # initial merge-in immunity so simultaneous spawns aren't born "crashed"
+        # (cars spread apart before grace expires). Minimal spawn-clean for the
+        # finite cohort; see docs/HANDOFF-sim-contract.md §0.
+        spawn_grace=jnp.full(n, SPAWN_GRACE, jnp.int32),
+        arrived=jnp.zeros(n, bool), goals=jnp.zeros(n, jnp.int32),
         ped_pos=jax.random.uniform(kp, (env.n_peds, 2),
                                    minval=env.world_min, maxval=env.world_max),
         ped_dir=jax.random.uniform(kpd, (env.n_peds,), minval=-jnp.pi, maxval=jnp.pi),
@@ -235,7 +243,7 @@ def reset(env: Env, key: jax.Array):
 
 def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
     N = env.n_agents
-    kidx, kfrac, kped = jax.random.split(key, 3)
+    _, _, kped = jax.random.split(key, 3)   # (respawn RNG retired; peds still need a key)
 
     accel = jnp.clip(action[:, 0], -1, 1) * env.accel_max
     delta = jnp.clip(action[:, 1], -1, 1) * env.steer_max
@@ -257,22 +265,29 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
     herr = _wrap(jnp.arctan2(to_wp[:, 1], to_wp[:, 0]) - heading)
     progress = speed * jnp.cos(herr) * env.dt
 
+    # done = this car has already finished (arrived) or crashed -> it is FROZEN at
+    # its final spot and removed from the simulation (no respawn, no collisions, no
+    # reward). The cohort is finite: each car runs ONE trip, then parks. See §0②.
+    done = st.arrived | (st.crashes > 0)
+
     n_wp = env.routes_n[st.route_idx]
     hit = dist < env.wp_radius
-    new_goal = hit & (st.wp_ptr >= n_wp - 1)
-    advance = hit & (st.wp_ptr < n_wp - 1)
+    new_goal = hit & (st.wp_ptr >= n_wp - 1) & ~done
+    advance = hit & (st.wp_ptr < n_wp - 1) & ~done
     wp_ptr = jnp.where(advance, st.wp_ptr + 1, st.wp_ptr)
 
     # spatial-hash neighbor reductions
     cand = _candidates(env, pos)
     valid = (cand >= 0) & (cand != jnp.arange(N)[:, None])
     rel = pos[cand] - pos[:, None, :]
-    cd = jnp.where(valid, jnp.linalg.norm(rel, axis=-1), 1e9)
+    # EXCLUDE spawn-immune and already-done cars as collision partners/victims: a
+    # car merging in, or a frozen finished/crashed car, is never an obstacle and
+    # never counts as a crash for either side. Only genuine contact between two
+    # active, established cars registers.
+    immune = (st.spawn_grace > 0) | done
+    neighbor_ok = valid & ~immune[cand]
+    cd = jnp.where(neighbor_ok, jnp.linalg.norm(rel, axis=-1), 1e9)
     min_d = cd.min(1)
-    # spawn_grace: a car that just respawned ("merged in") is immune for a few
-    # steps, so a respawn landing near another car is not counted as a (spurious)
-    # teleport-overlap crash. Real cars enter from map edges, not on top of others.
-    immune = st.spawn_grace > 0
     car_crash = (min_d < env.collision_radius) & ~immune
     prox_pen = jnp.clip((env.prox_radius - min_d) / env.prox_radius, 0, 1)
 
@@ -292,18 +307,21 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
     should_yield = near_junc & jnp.any(has_priority, axis=1)
     yield_pen = (should_yield & (speed > env.idle_speed)).astype(jnp.float32)
 
-    # respawn cars that finished a trip OR crashed (a crash clears, not freezes)
-    respawn = new_goal | crash_event
-    new_idx = jax.random.randint(kidx, (N,), 0, env.routes_xy.shape[0])
-    rs_pos, rs_head, rs_wp = _entry_spawn(env, new_idx, kfrac)
-    route_idx = jnp.where(respawn, new_idx, st.route_idx)
-    pos = jnp.where(respawn[:, None], rs_pos, pos)
-    heading = jnp.where(respawn, rs_head, heading)
-    wp_ptr = jnp.where(respawn, rs_wp, wp_ptr)
-    lane = jnp.where(respawn, 0, lane)
-    speed = jnp.where(respawn, 0.0, speed)
-    goals = st.goals + new_goal.astype(jnp.int32)
+    # NO respawn. A car becomes done the step it arrives or crashes; from then on it
+    # is frozen at that spot. `done` (above) was the state at the START of this step;
+    # cars finishing THIS step keep the position where they finished, then stop.
+    arrived = st.arrived | new_goal
     crashes = st.crashes + crash_event.astype(jnp.int32)
+    goals = st.goals + new_goal.astype(jnp.int32)
+    done_after = arrived | (crashes > 0)
+
+    # freeze: already-done cars hold their pose; cars done as of this step stop moving.
+    pos = jnp.where(done[:, None], st.pos, pos)
+    heading = jnp.where(done, st.heading, heading)
+    wp_ptr = jnp.where(done, st.wp_ptr, wp_ptr)
+    lane = jnp.where(done, st.lane, lane)
+    speed = jnp.where(done_after, 0.0, speed)
+    spawn_grace = jnp.maximum(st.spawn_grace - 1, 0)
     ped_pos, ped_dir = _ped_step(env, st, kped)
 
     idle_pen = (speed < env.idle_speed)
@@ -316,14 +334,17 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
         - env.w_ped * ped_hit.astype(jnp.float32)
         + env.w_goal * new_goal.astype(jnp.float32)
     )
+    # a car already finished at the start of the step earns nothing further.
+    reward = jnp.where(done, 0.0, reward)
 
     t = st.t + 1
-    nst = State(pos=pos, heading=heading, speed=speed, route_idx=route_idx,
+    nst = State(pos=pos, heading=heading, speed=speed, route_idx=st.route_idx,
                 wp_ptr=wp_ptr, lane=lane, just_crashed=crash_event, crashes=crashes,
-                spawn_grace=jnp.where(respawn, 4, jnp.maximum(st.spawn_grace - 1, 0)),
+                spawn_grace=spawn_grace, arrived=arrived,
                 goals=goals, ped_pos=ped_pos, ped_dir=ped_dir, t=t)
     info = {"just_crashed": crash_event, "crashes": crashes,
-            "goals": goals, "total_goals": goals.sum(),
+            "goals": goals, "total_goals": goals.sum(), "arrived": arrived,
+            "arrived_count": arrived.sum(), "done": done_after,
             "crashes_per_car": crashes.mean(), "ped_hits": ped_hit.sum(),
             "mean_speed": jnp.mean(speed)}
     return nst, _observe(env, nst, _candidates(env, pos)), reward, t >= env.max_steps, info

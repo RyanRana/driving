@@ -62,7 +62,7 @@ def build_from_rollouts(net, env, tf, rollouts: dict, stride: int) -> dict:
         worlds[name] = S.pack_world(
             car_lon=car_lon, car_lat=car_lat, car_z=car_z,
             heading=tr["heading"], speed=tr["speed"],
-            crashed=tr["crashed"], goals=tr["goals"],
+            crashed=tr["crashed"], goals=tr["goals"], arrived=tr.get("arrived"),
             ped_lon=ped_lon, ped_lat=ped_lat, ped_z=ped_z, stride=stride)
     return worlds
 

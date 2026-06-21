@@ -14,8 +14,24 @@ def test_pack_world_shapes_and_keys():
     )
     assert set(world) == {"summary", "trips_series", "cars", "peds"}
     assert len(world["cars"]) == N
-    assert set(world["cars"][0]) == {"lng", "lat", "z", "hdg", "spd", "crash"}
+    assert set(world["cars"][0]) == {"lng", "lat", "z", "hdg", "spd", "crash", "arr"}
     assert len(world["cars"][0]["lng"]) == T
+
+
+def test_pack_world_arrived_latches_and_summarizes():
+    # car arrives at frame 2 -> "arr" is 0 before, 1 from then on (latched);
+    # summary reports the end-of-run arrived count.
+    T, N = 4, 1
+    arrived = np.zeros((T, N), bool)
+    arrived[2:, 0] = True
+    world = S.pack_world(
+        car_lon=np.zeros((T, N)), car_lat=np.zeros((T, N)), car_z=np.zeros((T, N)),
+        heading=np.zeros((T, N)), speed=np.zeros((T, N)),
+        crashed=np.zeros((T, N), bool), goals=np.zeros((T, N), int), arrived=arrived,
+        ped_lon=np.zeros((T, 0)), ped_lat=np.zeros((T, 0)), ped_z=np.zeros((T, 0)),
+        stride=1)
+    assert world["cars"][0]["arr"] == [0, 0, 1, 1]
+    assert world["summary"]["arrived_end"] == 1
 
 
 def test_validate_scene_accepts_minimal_valid_scene():

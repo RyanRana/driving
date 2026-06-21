@@ -23,16 +23,18 @@ from smoothride.env.routing import build_route_pool
 def _random_rollout(env, key, steps):
     """Roll the env with uniform-random actions; collect the arrays the exporter wants."""
     st, _ = K.reset(env, key)
-    pos, head, spd, crashed, goals, ped = [], [], [], [], [], []
+    pos, head, spd, crashed, goals, ped, arrived = [], [], [], [], [], [], []
     for t in range(steps):
         key, ka, ks = jax.random.split(key, 3)
         action = jax.random.uniform(ka, (env.n_agents, env.act_dim), minval=-1.0, maxval=1.0)
         st, _, _, _, info = K.step(env, st, action, ks)
         pos.append(st.pos); head.append(st.heading); spd.append(st.speed)
         crashed.append(info["just_crashed"]); goals.append(st.goals); ped.append(st.ped_pos)
+        arrived.append(info["arrived"])
     to = lambda xs: np.asarray(jnp.stack(xs))
     return {"pos": to(pos), "heading": to(head), "speed": to(spd),
-            "crashed": to(crashed), "goals": to(goals), "ped": to(ped)}
+            "crashed": to(crashed), "goals": to(goals), "ped": to(ped),
+            "arrived": to(arrived)}
 
 
 def run(out: str, agents: int = 12, peds: int = 6, steps: int = 60, seed: int = 0) -> str:

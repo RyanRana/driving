@@ -94,9 +94,16 @@ function sampledPosition(car, start, meta) {
   return p;
 }
 
-function speedColor(spd, vmax) {
-  const f = Math.max(0, Math.min(1, spd / (vmax || 16)));
-  return Cesium.Color.fromHsl(0.33 * f, 0.9, 0.5);   // red(stopped) -> green(fast)
+// Per-car colour by state: red = crashed, green = arrived (trip complete),
+// blue = en route (brighter the faster it's going). Crash takes priority — a car
+// is at most one of these since arrival/crash are terminal (remove-on-arrival).
+const CRASH_RED = Cesium.Color.fromCssColorString("#ef4444");
+const DONE_GREEN = Cesium.Color.fromCssColorString("#22c55e");
+function carColor(car, i, vmax) {
+  if (car.crash[i]) return CRASH_RED;
+  if (car.arr && car.arr[i]) return DONE_GREEN;
+  const f = Math.max(0, Math.min(1, car.spd[i] / (vmax || 16)));
+  return Cesium.Color.fromHsl(0.58, 0.85, 0.4 + 0.25 * f);   // en route: blue, brighter=faster
 }
 
 function frameIndex(car, start, time, meta) {
@@ -127,8 +134,7 @@ function addCar(viewer, car, start, meta) {
     box: {
       dimensions: new Cesium.Cartesian3(CAR_L, CAR_W, CAR_H),
       material: new Cesium.ColorMaterialProperty(new Cesium.CallbackProperty((time) => {
-        const i = frameIndex(car, start, time, meta);
-        return car.crash[i] ? Cesium.Color.DIMGRAY : speedColor(car.spd[i], meta.vmax);
+        return carColor(car, frameIndex(car, start, time, meta), meta.vmax);
       }, false)),
     },
   });

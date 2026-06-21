@@ -21,18 +21,26 @@ import os
 import numpy as np
 
 SCHEMA_VERSION = 1
-_CAR_KEYS = {"lng", "lat", "z", "hdg", "spd", "crash"}
+_CAR_KEYS = {"lng", "lat", "z", "hdg", "spd", "crash", "arr"}
 _META_KEYS = {"dt", "n_steps", "vmax", "center", "bounds"}
 _WORLD_KEYS = {"summary", "trips_series", "cars", "peds"}
 _SUMMARY_KEYS = {"cars", "crashed_end"}
 
 
 def pack_world(*, car_lon, car_lat, car_z, heading, speed, crashed, goals,
-               ped_lon, ped_lat, ped_z, stride: int) -> dict:
-    """Reproject-agnostic packer: takes already-lon/lat arrays (T, N) -> world dict."""
+               ped_lon, ped_lat, ped_z, stride: int, arrived=None) -> dict:
+    """Reproject-agnostic packer: takes already-lon/lat arrays (T, N) -> world dict.
+
+    `arrived` (T, N) bool marks cars that have reached their destination (finite
+    cohort, remove-on-arrival). Both crash and arrival LATCH so the viewer can keep
+    a car red (crashed) / green (arrived) / blue (en route) for the rest of the run.
+    """
     T, N = car_lon.shape
     frames = range(0, T, stride)
     persist_crash = np.cumsum(crashed.astype(np.int32), axis=0) > 0
+    if arrived is None:
+        arrived = np.zeros((T, N), bool)
+    persist_arr = np.cumsum(np.asarray(arrived).astype(np.int32), axis=0) > 0
 
     cars = []
     for i in range(N):
@@ -43,6 +51,7 @@ def pack_world(*, car_lon, car_lat, car_z, heading, speed, crashed, goals,
             "hdg": [round(float(heading[t, i]), 4) for t in frames],
             "spd": [round(float(speed[t, i]), 2) for t in frames],
             "crash": [int(persist_crash[t, i]) for t in frames],
+            "arr": [int(persist_arr[t, i]) for t in frames],
         })
 
     peds = []
@@ -58,6 +67,7 @@ def pack_world(*, car_lon, car_lat, car_z, heading, speed, crashed, goals,
         "cars": int(N), "peds": int(ped_lon.shape[1]),
         "trips_end": int(goals[-1].sum()),
         "crashed_end": int(persist_crash[-1].sum()),
+        "arrived_end": int(persist_arr[-1].sum()),
         "moving_end": moving_end,
     }
     trips_series = [int(goals[t].sum()) for t in frames]
