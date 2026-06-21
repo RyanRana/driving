@@ -49,6 +49,9 @@ def _roads_3d(net, tf):
     return out
 
 
+roads_3d = _roads_3d  # public alias
+
+
 def build_from_rollouts(net, env, tf, rollouts: dict, stride: int) -> dict:
     worlds = {}
     for name, tr in rollouts.items():

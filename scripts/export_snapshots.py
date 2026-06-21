@@ -104,9 +104,9 @@ def main() -> None:
     from smoothride.demo.export_cesium import (
         DEFAULT_OUT,
         build_from_rollouts,
-        _roads_3d,
+        roads_3d,
     )
-    from smoothride.demo.export_web import _lonlat_transformer, _to_lonlat
+    from smoothride.demo.export_web import lonlat_transformer, to_lonlat
     from smoothride.demo import scene as S
     from smoothride.demo.render import load_params, rollout
     from smoothride.env import kinematic as K
@@ -162,10 +162,10 @@ def main() -> None:
     pool = build_route_pool(net, n_routes=1024, seed=0)
     env = K.make_env(pool, (x0, y0), (x1, y1),
                      n_agents=args.agents, n_peds=args.n_peds, max_steps=args.steps)
-    tf = _lonlat_transformer(net)
+    tf = lonlat_transformer(net)
 
     corners = np.array([[x0, y0], [x1, y1]], np.float32)
-    clon, clat = _to_lonlat(net, tf, corners)
+    clon, clat = to_lonlat(net, tf, corners)
     meta = {
         "dt": float(env.dt) * args.stride,
         "n_steps": len(range(0, args.steps, args.stride)),
@@ -175,7 +175,7 @@ def main() -> None:
                    [round(float(clon[1]), 6), round(float(clat[1]), 6)]],
         "zoom": 15.5,
     }
-    roads_3d = _roads_3d(net, tf)
+    roads_3d_data = roads_3d(net, tf)
     buildings: dict = {"type": "FeatureCollection", "features": []}
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -189,7 +189,7 @@ def main() -> None:
         rollouts = {f"iter_{it:05d}": tr}
         worlds = build_from_rollouts(net, env, tf, rollouts, args.stride)
 
-        scene = S.build_scene(meta=meta, roads=roads_3d, buildings=buildings,
+        scene = S.build_scene(meta=meta, roads=roads_3d_data, buildings=buildings,
                               worlds=worlds)
         out_path = os.path.join(args.out_dir, f"scene_it{it:05d}.json")
         nbytes = S.write_scene(out_path, scene)
