@@ -135,7 +135,8 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
           regions: str = "", tag: str = "", n_peds: int = 300, cruise_cap: float = 7.0,
           ped_radius: float = 3.5, cand_cap: int = 16,
           snapshot_every: int = 50, soft_target: float = 0.05,
-          w_carped: float = 3.0, arch: str = "deepsets") -> dict:
+          w_carped: float = 3.0, arch: str = "deepsets",
+          gamma: float = 0.99) -> dict:
     """Train the shared-weight nav policy; write {untrained,trained}{tag}.msgpack
     to the volume. Returns the final-iteration metrics dict.
 
@@ -215,10 +216,15 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
     # Use the first region's env to initialise the train state (obs/act dims are
     # identical across regions since make_env params match).
     first_env = env_map[active_regions[0]]
-    cfg = ppo.PPOConfig(n_worlds=worlds, encoder=arch)
+    cfg = ppo.PPOConfig(n_worlds=worlds, encoder=arch, gamma=gamma)
+    # True structured obs size (ego + masked car/ped sets), not the back-compat
+    # obs_dim scalar (which now reports EGO_FEAT only).
+    obs_total = (K.EGO_FEAT + first_env.cand_cap_car * K.CAR_FEAT
+                 + first_env.cand_cap_ped * K.PED_FEAT)
     print(f"device={jax.devices()} env: agents={first_env.n_agents} "
-          f"obs={first_env.obs_dim} steps={first_env.max_steps} "
-          f"worlds={cfg.n_worlds}", flush=True)
+          f"obs={obs_total} (ego{K.EGO_FEAT}+cars{first_env.cand_cap_car}x{K.CAR_FEAT}"
+          f"+peds{first_env.cand_cap_ped}x{K.PED_FEAT}) steps={first_env.max_steps} "
+          f"worlds={cfg.n_worlds} gamma={cfg.gamma}", flush=True)
     print(f"dual-Lagrangian: crash_target={crash_target} "
           f"soft_target={effective_soft_target} w_carped={w_carped}", flush=True)
 
@@ -336,7 +342,7 @@ def main(iters: int = 300, worlds: int = 64, agents: int = 64,
          cruise_cap: float = 7.0, ped_radius: float = 3.5, cand_cap: int = 16,
          seed: int = 0, snapshot_every: int = 50, crash_target: float = 0.0,
          soft_target: float = 0.05, w_carped: float = 3.0,
-         arch: str = "deepsets"):
+         arch: str = "deepsets", gamma: float = 0.99):
     """Local entrypoint: spawns (or waits on) the remote training function.
 
     New flags (v2 Task 3 — dual-Lagrangian):
@@ -366,7 +372,8 @@ def main(iters: int = 300, worlds: int = 64, agents: int = 64,
               region=region, regions=regions, tag=tag, n_peds=n_peds,
               cruise_cap=cruise_cap, ped_radius=ped_radius, cand_cap=cand_cap,
               seed=seed, snapshot_every=snapshot_every, crash_target=crash_target,
-              soft_target=soft_target, w_carped=w_carped, arch=arch)
+              soft_target=soft_target, w_carped=w_carped, arch=arch,
+              gamma=gamma)
     if wait:                       # blocking: streams live, dies if the client drops
         print("final metrics:", train.remote(**kw))
         return
