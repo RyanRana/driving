@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -109,26 +110,46 @@ def _road_geoms(net, cx, cy) -> str:
     return "\n".join(out)
 
 
-def _building_geoms(net, cx, cy, bbox) -> str:
-    """Optional: OSM building footprints as extruded boxes. Network fetch."""
+def _building_bounds(net, bbox) -> list:
+    """Projected (minx, miny, maxx, maxy) per OSM building footprint.
+
+    The Overpass fetch + projection costs several seconds, so the result is
+    cached to data_cache keyed by bbox + target CRS. Warm runs read the JSON
+    and never import osmnx, so the building layer stops gating scene build.
+    """
+    crs = str(net.G.graph["crs"])
+    key = hashlib.md5(f"{tuple(round(v, 6) for v in bbox)}|{crs}".encode()).hexdigest()[:12]
+    cache = os.path.join(os.path.dirname(__file__), "..", "..", "data_cache",
+                         f"buildings_{key}.json")
+    if os.path.exists(cache):
+        with open(cache) as f:
+            return json.load(f)
+
     try:
         import osmnx as ox
     except ImportError:
-        return ""
+        return []
     try:
         gdf = ox.features_from_bbox(bbox, tags={"building": True})
         # drop null/invalid/non-polygon rows BEFORE projecting (avoids NaN-area crash)
         gdf = gdf[gdf.geometry.notna() & gdf.geometry.is_valid]
         gdf = gdf[gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])]
-        gdf = ox.projection.project_gdf(gdf, to_crs=net.G.graph["crs"])
+        gdf = ox.projection.project_gdf(gdf, to_crs=crs)
     except Exception as e:  # offline / no buildings / API hiccup
         print(f"  [buildings] skipped: {e}")
-        return ""
+        return []
+    bounds = [list(g.bounds) for g in gdf.geometry
+              if g is not None and not g.is_empty]
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    with open(cache, "w") as f:
+        json.dump(bounds, f)
+    return bounds
+
+
+def _building_geoms(net, cx, cy, bbox) -> str:
+    """OSM building footprints as extruded MJCF boxes (cached fetch)."""
     out, n = [], 0
-    for geom in gdf.geometry:
-        if geom is None or geom.is_empty:
-            continue
-        minx, miny, maxx, maxy = geom.bounds
+    for minx, miny, maxx, maxy in _building_bounds(net, bbox):
         if not all(math.isfinite(v) for v in (minx, miny, maxx, maxy)):
             continue                            # skip NaN/inf geometries
         w, h = (maxx - minx) / 2, (maxy - miny) / 2
@@ -144,7 +165,7 @@ def _building_geoms(net, cx, cy, bbox) -> str:
     return "\n".join(out)
 
 
-def build(cars: int, out: str, seed: int, buildings: bool):
+def build(cars: int, out: str, seed: int, buildings: bool, radius: float | None = None):
     net = load_road_network()
     x0, y0, x1, y1 = net.bounds()
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2       # recenter scene on the map middle
@@ -158,7 +179,24 @@ def build(cars: int, out: str, seed: int, buildings: bool):
     # RoutePlanner (which rebuilds the SAME pool from the seed below) finds the
     # car already on its route and advances waypoints from step 1.
     pool = build_route_pool(net, n_routes=ROUTE_N, max_length_m=ROUTE_MAX_M, seed=seed)
-    car_routes = [int(r) for r in rng.integers(0, pool.n_routes, size=cars)]
+
+    # radius (m): keep only routes that stay within `radius` of the map centre, so
+    # all `cars` pack into one downtown pocket -> dense, intense traffic in view.
+    local_routes = None
+    if radius:
+        rec = pool.xy - np.array([cx, cy], np.float32)        # (P, W, 2) recentred
+        d = np.linalg.norm(rec, axis=2)                       # (P, W)
+        wp = np.arange(pool.xy.shape[1])[None, :] < pool.n[:, None]
+        dmax = np.where(wp, d, 0.0).max(axis=1)               # furthest waypoint/route
+        local_routes = np.where(dmax < radius)[0]
+        if len(local_routes) < 8:                             # too tight -> don't strand cars
+            print(f"  [radius] only {len(local_routes)} routes within {radius} m — ignoring")
+            local_routes = None
+        else:
+            print(f"  [radius] {len(local_routes)}/{pool.n_routes} routes within {radius} m")
+
+    pick = local_routes if local_routes is not None else np.arange(pool.n_routes)
+    car_routes = [int(r) for r in rng.choice(pick, size=cars)]
     car_bodies, car_acts, car_sens = [], [], []
     for i, r in enumerate(car_routes):
         p0 = pool.xy[r, 0] - (cx, cy)
@@ -233,7 +271,9 @@ def build(cars: int, out: str, seed: int, buildings: bool):
         "cars": [{"body": f"c{i}_chassis", "pos_sensor": f"c{i}_pos"}
                  for i in range(len(car_bodies))],
         "routing": {"route_seed": seed, "n_routes": ROUTE_N,
-                    "max_length_m": ROUTE_MAX_M, "car_routes": car_routes},
+                    "max_length_m": ROUTE_MAX_M, "car_routes": car_routes,
+                    "local_routes": (None if local_routes is None
+                                     else [int(r) for r in local_routes])},
         "cameras": ["drone", "oblique"],
         "map": {"center_utm_minus_origin": [cx, cy], "origin_utm": list(net.origin),
                 "crs": str(net.G.graph["crs"]),

@@ -20,8 +20,12 @@ import flax.struct as struct
 import jax
 import jax.numpy as jnp
 
+from .. import jaxcfg
 from . import spatial
 from .routing import RoutePool
+
+# Reuse compiled XLA kernels across runs (kinematic is on every JAX entry point).
+jaxcfg.enable_compile_cache()
 
 
 @struct.dataclass

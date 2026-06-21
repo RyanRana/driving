@@ -18,9 +18,10 @@ const MURAL_IMAGE = new URLSearchParams(location.search).get("mural") || "./buil
 // folder name because it contains a space ("building sides").
 const SIDE_IMAGES = [1, 2, 3, 4, 5].map((n) => `./building%20sides/side${n}.jpg`);
 
-// How to apply them: "single" = one photo fills each facade (default),
-// "tile" = the busier repeating pattern. Switch with ?skin=tile.
-const SKIN_MODE = new URLSearchParams(location.search).get("skin") === "tile" ? "tile" : "single";
+// How to apply them: "tile" = pictures stacked up the facade at a fixed size, kept
+// undistorted (default). "single" = stretch one photo to fill the whole facade.
+// Switch with ?skin=single.
+const SKIN_MODE = new URLSearchParams(location.search).get("skin") === "single" ? "single" : "tile";
 
 // Draw a labeled placeholder skin so murals render even before you supply a photo.
 function placeholderMural() {
@@ -91,16 +92,33 @@ async function boot() {
 
   const viewer = new Cesium.Viewer("cesiumContainer", opts);
   viewer.scene.globe.depthTestAgainstTerrain = !!TOKEN;
+  window.viewer = viewer; // exposed for the GIF capture harness
 
   let muralImg = null;
   if (TOKEN) {
     try {
       const osm = await Cesium.createOsmBuildingsAsync();
       viewer.scene.primitives.add(osm);
+      window.osmBuildings = osm; // exposed for the GIF capture harness
+      // Faster first paint: load coarser tiles, skip intermediate LODs instead of
+      // streaming every level, and only refine to full detail once the camera
+      // settles. Override the look with ?sse=<n> (lower = sharper but slower).
+      const sse = Number(new URLSearchParams(location.search).get("sse")) || 24;
+      osm.maximumScreenSpaceError = sse;          // default 16 -> fewer tiles up front
+      osm.skipLevelOfDetail = true;               // jump straight toward the target LOD
+      osm.baseScreenSpaceError = 1024;
+      osm.skipScreenSpaceErrorFactor = 16;
+      osm.skipLevels = 1;
+      osm.dynamicScreenSpaceError = true;         // coarse while moving, refine when still
+      osm.preloadWhenHidden = false;              // don't fetch tiles for hidden frames
       // Skin EVERY building, each randomly assigned one of the side images.
       try {
         const atlas = await buildImageAtlas(SIDE_IMAGES);
-        skinBuildingsWithAtlas(osm, atlas, { mode: SKIN_MODE, center: [SF.lon, SF.lat] });
+        // Square footprint (wall == floor) so the square atlas cell isn't re-stretched
+        // on the wall -> pictures stay undistorted as they stack.
+        skinBuildingsWithAtlas(osm, atlas, {
+          mode: SKIN_MODE, center: [SF.lon, SF.lat], wallMeters: 16, floorMeters: 16,
+        });
         console.log(`Skinned buildings: ${atlas.count} images, mode=${SKIN_MODE}.`);
       } catch (e) {
         console.warn("atlas skin failed, falling back to single placeholder:", e);
@@ -135,18 +153,37 @@ async function boot() {
     setTimeout(() => document.getElementById("msg").removeAttribute("data-show"), 4000);
   }
 
+  // Start zoomed into the downtown pocket. URL params let an external capture
+  // harness frame a specific intersection/edge case:
+  //   ?lon=&lat=&alt=&pitch=&heading=  -> camera   ?t=<frame>&pause=1 -> freeze time
+  const q = new URLSearchParams(location.search);
+  const camLon = parseFloat(q.get("lon")), camLat = parseFloat(q.get("lat"));
+  const alt = parseFloat(q.get("alt")) || 300;
+  const pitch = parseFloat(q.get("pitch")) || -32;
+  const heading = parseFloat(q.get("heading")) || 0;
+  const dest = (!isNaN(camLon) && !isNaN(camLat))
+    ? Cesium.Cartesian3.fromDegrees(camLon, camLat, alt)
+    : Cesium.Cartesian3.fromDegrees(center[0], center[1] - 0.0019, alt);
   viewer.camera.flyTo({
-    destination: Cesium.Cartesian3.fromDegrees(center[0], center[1] - 0.0032, 420),
-    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-28), roll: 0 },
-    duration: 1.5,
+    destination: dest,
+    orientation: { heading: Cesium.Math.toRadians(heading),
+                   pitch: Cesium.Math.toRadians(pitch), roll: 0 },
+    duration: q.has("lon") ? 0 : 1.5,
   });
 
+  const tf = parseInt(q.get("t"), 10);
+  if (!isNaN(tf) && viewer.clock) {
+    viewer.clock.currentTime = Cesium.JulianDate.addSeconds(
+      viewer.clock.startTime, tf * (window.__DT || 0.2), new Cesium.JulianDate());
+    if (q.get("pause") === "1") viewer.clock.shouldAnimate = false;
+  }
 }
 
 // Build the animation clock + both worlds: trained = 3D model fleet, untrained =
 // faint "shadow world" points (gridlock), so the learning delta still reads.
 function addFleet(viewer, DATA) {
   const NF = DATA.meta.n_steps, DT = DATA.meta.dt;
+  window.__DT = DT;                 // for the ?t=<frame> capture param
   const start = Cesium.JulianDate.now();
   const stop = Cesium.JulianDate.addSeconds(start, NF * DT, new Cesium.JulianDate());
   Object.assign(viewer.clock, {
@@ -199,21 +236,53 @@ function addFleet(viewer, DATA) {
     return pos;
   }
 
-  // trained world -> the random-colored 3D model fleet. Orientation is
-  // velocity-derived (model +X is our forward axis) -> faces its travel direction.
+  // Orientation from the exported heading, NOT velocity: VelocityOrientationProperty
+  // goes undefined at zero speed, so a stopped/parked car snapped to a default facing
+  // (the "turning sideways" glitch in stop-and-go). hdg is always defined. Cesium
+  // heading = -hdg (our hdg is CCW-from-east; Cesium heading is CW-from-north about
+  // the down axis) — verified the model's nose lands on +east with the orient probe.
+  function tripOri(c, t0, t1) {
+    const ori = new Cesium.SampledProperty(Cesium.Quaternion);
+    for (let t = t0; t <= t1; t++) {
+      const hpr = new Cesium.HeadingPitchRoll(-c.hdg[t], 0, 0);
+      ori.addSample(timeAt(t), Cesium.Transforms.headingPitchRollQuaternion(carto(c, t), hpr));
+    }
+    ori.forwardExtrapolationType = Cesium.ExtrapolationType.HOLD;
+    ori.backwardExtrapolationType = Cesium.ExtrapolationType.HOLD;
+    return ori;
+  }
+
+  // Distance LOD so the city feels populated everywhere you pan WITHOUT lag and
+  // WITHOUT cars popping in from nothing. Every car carries two graphics:
+  //   * a cheap dot  — always present, so wherever you look there are cars;
+  //   * the 3D model — only rendered within MODEL_FAR m of the camera (few dozen at
+  //     a time -> cheap). They CROSS-FADE: as you approach, the dot fades out
+  //     (translucencyByDistance) exactly as the model fades in, so it reads as
+  //     lazy-loaded detail resolving, not a spawn. Cesium frustum-culls whatever is
+  //     off-screen for free.
+  const MODEL_FAR = 600;          // model drawn within this many metres of camera
   const carEntities = [];
   DATA.worlds.trained.cars.forEach((c, i) => {
     const trip = longestTrip(c);
     if (!trip) return;
     const look = carLook(i);
-    const pos = tripPos(c, trip[0], trip[1]);
     carEntities.push(viewer.entities.add({
-      position: pos, orientation: new Cesium.VelocityOrientationProperty(pos),
+      position: tripPos(c, trip[0], trip[1]),
+      orientation: tripOri(c, trip[0], trip[1]),
+      point: {
+        pixelSize: 7, color: look.color,
+        outlineColor: Cesium.Color.BLACK.withAlpha(0.4), outlineWidth: 1,
+        heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        // invisible when close (model takes over), opaque far -> the placeholder
+        translucencyByDistance: new Cesium.NearFarScalar(MODEL_FAR * 0.6, 0.0, MODEL_FAR, 1.0),
+      },
       model: {
         uri: `./assets/${look.body}.glb`,
-        minimumPixelSize: 28, maximumScale: 12, scale: 1.0,
+        minimumPixelSize: 24, maximumScale: 12, scale: 1.0,
         color: look.color, colorBlendMode: Cesium.ColorBlendMode.MIX, colorBlendAmount: 0.65,
         heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0.0, MODEL_FAR),
       },
     }));
   });

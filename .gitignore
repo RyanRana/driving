@@ -16,3 +16,5 @@ smoothride/demo/web/config.js
 cache/
 *.egg-info/
 smoothride/demo/cesium/config.js
+jax_cache/
+data_cache/*.json
