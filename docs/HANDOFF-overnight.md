@@ -138,3 +138,5 @@
 
 ## _v6loolow RESULT: held-out Mission 2/96 (2%) crash, 70% arrivals, off-lane 24%/step (WORSE lane discipline). Did NOT beat v4loo (1/96). => Held-out crash floor ~1-2% with this method; v4loo is the generalization CHAMPION. In-distribution champion remains _v5c96p5x (0.07%).
 ## NIGHT CONCLUDED. Champions: in-dist trained_v5c96p5x (0.07%); held-out trained_v4loo (1%). All committed+pushed.
+
+## TEAM DEMO: champion v4loo rendered on held-out Mission -> smoothride/demo/cesium/public/scene_champion_mission.json (added to viewer dropdown as "CHAMPION v4loo — held-out Mission"). Re-render cmd: cp runs/trained_v4loo.msgpack runs_demo/trained_demo_it00000.msgpack; python3 scripts/export_snapshots.py --region mission --tag _demo --agents 96 --n-peds 10 --steps 250 --elevation synthetic --ckpt-dir runs_demo --out-dir smoothride/demo/cesium/public
