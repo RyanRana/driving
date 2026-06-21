@@ -141,8 +141,19 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
 @app.local_entrypoint()
 def main(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
          steps: int = 300, lagrangian: bool = True, verifier: bool = True,
-         cost_target: float = 0.05, region: str = "downtown", tag: str = ""):
-    metrics = train.remote(iters=iters, worlds=worlds, agents=agents, peds=peds,
-                           steps=steps, lagrangian=lagrangian, verifier=verifier,
-                           cost_target=cost_target, region=region, tag=tag)
-    print("final metrics:", metrics)
+         cost_target: float = 0.05, region: str = "downtown", tag: str = "",
+         wait: bool = False):
+    kw = dict(iters=iters, worlds=worlds, agents=agents, peds=peds, steps=steps,
+              lagrangian=lagrangian, verifier=verifier, cost_target=cost_target,
+              region=region, tag=tag)
+    if wait:                       # blocking: streams live, dies if the client drops
+        print("final metrics:", train.remote(**kw))
+        return
+    # Default: SPAWN server-side so a flaky local connection can't cancel the run
+    # (modal warns .remote() in detached apps is canceled on client disconnect).
+    # Launch with `modal run --detach` so the app outlives this client. Checkpoints
+    # (saved every 10 iters) land in the volume regardless.
+    fc = train.spawn(**kw)
+    print(f"spawned training (call {fc.object_id}); region={region} tag={tag}\n"
+          f"  checkpoints -> volume '{APP_NAME}-ckpts' (untrained{tag}.msgpack / trained{tag}.msgpack)\n"
+          f"  pull when done:  modal volume get {APP_NAME}-ckpts trained{tag}.msgpack runs/trained{tag}.msgpack")
