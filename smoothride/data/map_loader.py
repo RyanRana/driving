@@ -22,6 +22,15 @@ from . import elevation as _elev
 # bbox = (west, south, east, north) = (left, bottom, right, top).
 DOWNTOWN_SF_BBOX = (-122.4180, 37.7820, -122.4000, 37.7950)
 
+# Named SF neighborhoods (same W,S,E,N convention) for train/eval on distinct,
+# non-overlapping regions — lets us test generalization (train one, validate another).
+SF_REGIONS = {
+    "downtown": DOWNTOWN_SF_BBOX,
+    "chinatown_fidi": (-122.4090, 37.7890, -122.3970, 37.7990),   # Chinatown + Financial District
+    "mission": (-122.4230, 37.7480, -122.4070, 37.7640),          # Mission District
+    "nopa": (-122.4450, 37.7680, -122.4270, 37.7810),             # Western Addition / NoPa
+}
+
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data_cache")
 
 

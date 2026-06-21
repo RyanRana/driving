@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from smoothride.data.map_loader import DOWNTOWN_SF_BBOX, load_road_network
+from smoothride.data.map_loader import SF_REGIONS, load_road_network
 from smoothride.demo.render import load_params
 from smoothride.env import kinematic as K
 from smoothride.env.routing import build_route_pool
@@ -106,6 +106,7 @@ def report(name: str, v, n: int, trace: Trace) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--region", default="", help=f"named region {list(SF_REGIONS)}; overrides --bbox")
     ap.add_argument("--bbox", type=float, nargs=4, default=list(HELDOUT_BBOX),
                     metavar=("W", "S", "E", "N"))
     ap.add_argument("--agents", type=int, default=60)
@@ -116,9 +117,8 @@ def main() -> None:
     ap.add_argument("--untrained", default="runs/untrained.msgpack")
     a = ap.parse_args()
 
-    bbox = tuple(a.bbox)
-    print(f"TRAINED on downtown box {DOWNTOWN_SF_BBOX}")
-    print(f"EVALUATING on HELD-OUT box {bbox}")
+    bbox = SF_REGIONS[a.region] if a.region else tuple(a.bbox)
+    print(f"EVALUATING on HELD-OUT region {a.region or bbox}")
     net = load_road_network(bbox=bbox)
     x0, y0, x1, y1 = net.bounds()
     pool = build_route_pool(net, n_routes=512, seed=a.seed)

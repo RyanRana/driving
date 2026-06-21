@@ -55,7 +55,8 @@ image = (
 def train(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
           steps: int = 300, vmax: float = 16.0, routes: int = 1024,
           lagrangian: bool = True, crash_target: float = 0.3, seed: int = 0,
-          verifier: bool = True, cost_target: float = 0.05, tag: str = "") -> dict:
+          verifier: bool = True, cost_target: float = 0.05, region: str = "downtown",
+          tag: str = "") -> dict:
     """Train the shared-weight nav policy; write {untrained,trained}{tag}.msgpack
     to the volume. Returns the final-iteration metrics dict."""
     import json
@@ -65,7 +66,7 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
     import jax
     from flax import serialization
 
-    from smoothride.data.map_loader import load_road_network
+    from smoothride.data.map_loader import SF_REGIONS, load_road_network
     from smoothride.env import kinematic as K
     from smoothride.env.routing import build_route_pool
     from smoothride.rl import ppo
@@ -74,7 +75,9 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
         with open(os.path.join(CKPT_DIR, name), "wb") as f:
             f.write(serialization.to_bytes(ts.params))
 
-    net = load_road_network()                       # pulls + caches the SF graph
+    bbox = SF_REGIONS[region]                        # train region (named neighborhood)
+    print(f"region={region} bbox={bbox}", flush=True)
+    net = load_road_network(bbox=bbox)               # pulls + caches the SF graph
     x0, y0, x1, y1 = net.bounds()
     pool = build_route_pool(net, n_routes=routes, seed=seed)
     # Lagrangian: zero the fixed crash penalty so the adaptive multiplier owns it.
@@ -138,8 +141,8 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
 @app.local_entrypoint()
 def main(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
          steps: int = 300, lagrangian: bool = True, verifier: bool = True,
-         cost_target: float = 0.05, tag: str = ""):
+         cost_target: float = 0.05, region: str = "downtown", tag: str = ""):
     metrics = train.remote(iters=iters, worlds=worlds, agents=agents, peds=peds,
                            steps=steps, lagrangian=lagrangian, verifier=verifier,
-                           cost_target=cost_target, tag=tag)
+                           cost_target=cost_target, region=region, tag=tag)
     print("final metrics:", metrics)
