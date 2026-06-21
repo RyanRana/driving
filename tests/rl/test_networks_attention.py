@@ -9,10 +9,10 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from smoothride.rl.networks import AttentionPool, ActorCritic
 from smoothride.rl import ppo
+from smoothride.env import kinematic as K
 from tests.env.test_kinematic_peds import _env
 
 
@@ -163,8 +163,6 @@ def test_ppo_smoke_attention_encoder() -> None:
 # Shared helper (module-level, not a test)
 # ---------------------------------------------------------------------------
 
-def env_reset_obs(env):
+def env_reset_obs(env: K.Env) -> dict:
     """Reset env and return (state, obs). Used in attention encoder tests."""
-    import jax
-    from smoothride.env import kinematic as K
     return K.reset(env, jax.random.PRNGKey(0))

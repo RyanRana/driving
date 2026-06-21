@@ -50,11 +50,15 @@ class ActorCritic(nn.Module):
                 obs["cars"], obs["cars_mask"])           # (..., set_hidden)
             ped_enc = AttentionPool(hidden=self.set_hidden)(
                 obs["peds"], obs["peds_mask"])           # (..., set_hidden)
-        else:
+        elif self.encoder == "deepsets":
             car_enc = DeepSets(feat_dim=4, hidden=self.set_hidden)(
                 obs["cars"], obs["cars_mask"])           # (..., 2*set_hidden)
             ped_enc = DeepSets(feat_dim=5, hidden=self.set_hidden)(
                 obs["peds"], obs["peds_mask"])           # (..., 2*set_hidden)
+        else:
+            raise ValueError(
+                f"Unknown encoder {self.encoder!r}. Choose 'deepsets' or 'attention'."
+            )
         feat = jnp.concatenate([obs["ego"], car_enc, ped_enc], axis=-1)
 
         # --- actor: decentralized, local feature only ---
