@@ -86,6 +86,25 @@ def test_ped_crossing_bit_present_in_obs():
     assert set(np.unique(bit[np.asarray(obs["peds_mask"])])) <= {0.0, 1.0}
 
 
+def test_step_info_exposes_collision_components():
+    """info must expose car_crash and ped_hit separately, with just_crashed (combined)
+    remaining as their OR for back-compat (v2 Task 2)."""
+    env = _env()
+    st, _ = K.reset(env, jax.random.PRNGKey(0))
+    act = jnp.zeros((env.n_agents, env.act_dim))
+    _, _, _, _, info = K.step(env, st, act, jax.random.PRNGKey(0))
+
+    assert "car_crash" in info and "ped_hit" in info
+    car_crash = np.asarray(info["car_crash"])
+    ped_hit = np.asarray(info["ped_hit"])
+    assert car_crash.dtype == bool and ped_hit.dtype == bool
+    assert car_crash.shape == (env.n_agents,)
+    assert ped_hit.shape == (env.n_agents,)
+    # just_crashed (combined) preserved for back-compat == car_crash | ped_hit
+    combined = np.asarray(info["just_crashed"])
+    np.testing.assert_array_equal(combined, car_crash | ped_hit)
+
+
 def test_ped_advances_one_step_after_first_step():
     """Regression for the one-step ped/world-clock lag (post-step alignment).
 

@@ -431,7 +431,11 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
                 spawn_grace=spawn_grace, arrived=arrived,
                 goals=goals, ped_pos=ped_pos, ped_dir=ped_dir,
                 ped_vel=ped_vel, ped_crossing=ped_crossing, t=t)
-    info = {"just_crashed": crash_event, "crashes": crashes,
+    # Expose collision components separately (v2 Task 2): car_crash and ped_hit let the
+    # training relabel weight car-ped higher and target collisions -> 0. just_crashed
+    # (their OR) is KEPT for back-compat.
+    info = {"just_crashed": crash_event, "car_crash": car_crash, "ped_hit": ped_hit,
+            "crashes": crashes,
             "goals": goals, "total_goals": goals.sum(), "arrived": arrived,
             "arrived_count": arrived.sum(), "done": done_after,
             "crashes_per_car": crashes.mean(), "ped_hits": ped_hit.sum(),

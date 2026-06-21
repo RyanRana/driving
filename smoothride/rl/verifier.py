@@ -26,6 +26,8 @@ SPEED_EPS = 1e-6         # absorbs float noise in the speed-limit cross-check
 PED_RADIUS = 3.5         # m; hard car-ped keep-out (asymmetric: wider than car-car)
 PED_YIELD_RADIUS = 9.0   # m; outer yield zone where the continuous cost ramps
 CRUISE_CAP = 7.0         # m/s; reference speed for normalizing the yield term
+COLLISION_RADIUS = 2.2   # m; hard car-car contact distance (mirrors env default)
+CAR_RISK_RADIUS = 7.0    # m; outer car-car risk zone where the graded hinge ramps
 
 
 def _wrap(angle: np.ndarray) -> np.ndarray:
@@ -206,7 +208,11 @@ def step_cost(pos, seg_start, seg_end, lane_count, lane_width, heading, speed,
     against (no divergence).
 
     The ped-yield term is optional and backward-compatible: existing callers that
-    do not pass ped_pos / ped_crossing receive identical results to before."""
+    do not pass ped_pos / ped_crossing receive identical results to before.
+
+    NOTE: the graded car-risk term (`car_risk_cost`) is intentionally NOT folded in
+    here — `step_cost`/`cost_signal` must stay value-stable for the offline grader and
+    existing tests. The new hard/soft split (`step_cost_components`) carries car_risk."""
     _, off_lane, ww = _lane_flags(pos, seg_start, seg_end, lane_count, lane_width,
                                   heading, speed, spawn_grace)
     cost = (np.asarray(crashed, np.float32) + off_lane.astype(np.float32)
@@ -219,6 +225,105 @@ def step_cost(pos, seg_start, seg_end, lane_count, lane_width, heading, speed,
         cost = cost + ped_yield_cost(pos, speed, ped_pos, ped_crossing,
                                      r_ped, r_yield, cruise_cap)
     return cost
+
+
+def car_risk_cost(
+    pos: np.ndarray,
+    speed: np.ndarray,
+    spawn_grace: np.ndarray,
+    r_risk: float = CAR_RISK_RADIUS,
+    collision_radius: float = COLLISION_RADIUS,
+    cruise_cap: float = CRUISE_CAP,
+) -> np.ndarray:
+    """(T, N) continuous car-collision-risk cost: ramps with proximity × speed toward
+    the nearest OTHER car. Graded (a hinge), not a 0/1 flag — a dense "back off,
+    you're closing too fast" gradient that mirrors `ped_yield_cost` for cars.
+
+    Args:
+        pos: (T, N, 2) car positions in metres.
+        speed: (T, N) car speeds in m/s.
+        spawn_grace: (T, N) int — partners with grace > 0 are immune (never count).
+        r_risk: Outer risk radius (m); cost ramps from 0 at r_risk to 1 at
+            collision_radius.
+        collision_radius: Hard contact distance (m); cost is 1.0 at this distance.
+        cruise_cap: Reference speed (m/s) that normalises the speed factor.
+
+    Returns:
+        (T, N) float32 array in [0, 1]. Zero when the car is alone, stopped, or the
+        nearest non-immune other car is beyond r_risk. Graded between.
+    """
+    assert r_risk > collision_radius, "r_risk must exceed collision_radius"
+    T, N = pos.shape[:2]
+    if N < 2:                                          # alone → no car-car risk
+        return np.zeros((T, N), np.float32)
+    # d: (T, N, N) — pairwise car-car distances
+    d = np.linalg.norm(pos[:, :, None, :] - pos[:, None, :, :], axis=-1)
+    # proximity hinge: 0 outside r_risk, 1 at/inside collision_radius
+    prox = np.clip((r_risk - d) / (r_risk - collision_radius), 0.0, 1.0)
+    # exclude self (diagonal) and spawn-immune PARTNERS (along the last axis)
+    eye = np.eye(N, dtype=bool)[None, :, :]            # (1, N, N)
+    partner_immune = (spawn_grace > 0)[:, None, :]     # (T, 1, N)
+    prox = np.where(eye | partner_immune, 0.0, prox)
+    # worst-case other car per ego
+    prox = prox.max(axis=-1)                           # (T, N)
+    # speed factor: zero cost when stopped
+    spd = np.clip(speed / cruise_cap, 0.0, 1.0)
+    return (prox * spd).astype(np.float32)
+
+
+def step_cost_components(
+    pos, seg_start, seg_end, lane_count, lane_width, heading, speed, spawn_grace,
+    car_crashed, ped_hit, speed_limit=None, *, ped_pos=None, ped_crossing=None,
+    r_ped: float = PED_RADIUS, r_yield: float = PED_YIELD_RADIUS,
+    cruise_cap: float = CRUISE_CAP, r_risk: float = CAR_RISK_RADIUS,
+    collision_radius: float = COLLISION_RADIUS,
+) -> dict[str, np.ndarray]:
+    """Per-step cost broken into its constituent (T, N) float terms — the basis for
+    splitting HARD (collisions → 0) from SOFT (graded + lane) constraints.
+
+    Returns a dict with keys: car_crash, ped_hit (binary collisions), off_lane,
+    wrong_way, over_cap (graded/lane discipline), ped_yield, car_risk (graded hinges).
+    The lane/over_cap/ped_yield predicates are identical to those in `step_cost`."""
+    _, off_lane, ww = _lane_flags(pos, seg_start, seg_end, lane_count, lane_width,
+                                  heading, speed, spawn_grace)
+    shape = np.asarray(speed).shape
+    if speed_limit is not None:
+        over_cap = (speed > speed_limit + SPEED_EPS).astype(np.float32)
+    else:
+        over_cap = np.zeros(shape, np.float32)
+    if ped_pos is not None:
+        if ped_crossing is None:
+            raise ValueError("ped_crossing must be provided when ped_pos is not None")
+        ped_yield = ped_yield_cost(pos, speed, ped_pos, ped_crossing,
+                                   r_ped, r_yield, cruise_cap)
+    else:
+        ped_yield = np.zeros(shape, np.float32)
+    return {
+        "car_crash": np.asarray(car_crashed, np.float32),
+        "ped_hit": np.asarray(ped_hit, np.float32),
+        "off_lane": off_lane.astype(np.float32),
+        "wrong_way": ww.astype(np.float32),
+        "over_cap": over_cap,
+        "ped_yield": ped_yield,
+        "car_risk": car_risk_cost(pos, speed, spawn_grace, r_risk,
+                                  collision_radius, cruise_cap),
+    }
+
+
+def hard_cost(components: dict[str, np.ndarray], w_carcar: float = 1.0,
+              w_carped: float = 3.0) -> np.ndarray:
+    """(T, N) HARD-constraint cost: the binary collisions only, car-ped weighted
+    higher. This is the term a hard-constraint solver must drive to 0."""
+    return (w_carcar * components["car_crash"]
+            + w_carped * components["ped_hit"])
+
+
+def soft_cost(components: dict[str, np.ndarray]) -> np.ndarray:
+    """(T, N) SOFT-constraint cost: the graded hinges plus lane discipline (off_lane,
+    wrong_way, over_cap, ped_yield, car_risk). Excludes the binary collisions."""
+    return (components["off_lane"] + components["wrong_way"]
+            + components["over_cap"] + components["ped_yield"]
+            + components["car_risk"])
 
 
 def cost_signal(trace: Trace) -> np.ndarray:
