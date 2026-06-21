@@ -15,6 +15,11 @@ One-time:
 Run a scaled training (heavy density example):
   modal run -m smoothride.rl.modal_train --iters 400 --worlds 64 --agents 96 --n-peds 32
 
+Multi-region round-robin training (leave-one-out generalization):
+  modal run -m smoothride.rl.modal_train --regions downtown,nopa,chinatown_fidi --iters 400
+  # Then eval on the held-out region:
+  modal run -m smoothride.rl.modal_train --region mission --iters 0 --tag _loo_eval
+
 Pull the trained policy back for rendering:
   modal volume get smoothride-nav-ckpts trained.msgpack runs/trained.msgpack
   modal volume get smoothride-nav-ckpts untrained.msgpack runs/untrained.msgpack
@@ -53,6 +58,39 @@ image = (
     )
     .add_local_python_source("smoothride")
 )
+
+
+def region_for_iter(it: int, regions: list[str]) -> str:
+    """Return the training region for iteration *it* via round-robin.
+
+    Cycles through *regions* in order so each region receives approximately
+    the same number of iterations.  A single-region list always returns that
+    one region (``it % 1 == 0`` for every *it*).
+
+    Args:
+        it: Zero-based iteration index.
+        regions: Non-empty list of SF region keys (see ``SF_REGIONS``).
+
+    Returns:
+        The region key assigned to this iteration.
+
+    Raises:
+        ValueError: If *regions* is empty.
+
+    Examples::
+
+        >>> region_for_iter(0, ["downtown", "mission"])
+        'downtown'
+        >>> region_for_iter(1, ["downtown", "mission"])
+        'mission'
+        >>> region_for_iter(2, ["downtown", "mission"])
+        'downtown'
+        >>> region_for_iter(5, ["nopa"])
+        'nopa'
+    """
+    if not regions:
+        raise ValueError("regions must be a non-empty list")
+    return regions[it % len(regions)]
 
 
 def should_snapshot(it: int, snapshot_every: int, iters: int) -> bool:
@@ -94,7 +132,7 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
           steps: int = 300, vmax: float = 16.0, routes: int = 1024,
           lagrangian: bool = True, crash_target: float = 0.0, seed: int = 0,
           verifier: bool = True, cost_target: float = 0.05, region: str = "downtown",
-          tag: str = "", n_peds: int = 300, cruise_cap: float = 7.0,
+          regions: str = "", tag: str = "", n_peds: int = 300, cruise_cap: float = 7.0,
           ped_radius: float = 3.5, cand_cap: int = 16,
           snapshot_every: int = 50, soft_target: float = 0.05,
           w_carped: float = 3.0, arch: str = "deepsets") -> dict:
@@ -107,6 +145,15 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
     Both multipliers are clipped to [0, 400].
 
     ``cost_target`` is accepted for backward compat and maps to ``soft_target``.
+
+    Multi-region round-robin (v2 Task 5):
+      Pass ``regions`` as a comma-separated string (e.g. "downtown,nopa,mission").
+      Each iteration is assigned a region via ``region_for_iter``; the policy
+      params are shared across all regions.  One env per region is built once
+      before the loop.  The first JAX collect on each distinct env shape triggers
+      a recompile — expect ~one recompile per region at startup (acceptable).
+      When ``regions`` is empty, ``region`` is used as a single-region fallback
+      so single-region behaviour is completely unchanged.
 
     Additionally writes versioned snapshots ``trained{tag}_it{N:05d}.msgpack``
     at iter 0 (baseline), every ``snapshot_every`` iters, and the final iter.
@@ -138,26 +185,46 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
         with open(os.path.join(CKPT_DIR, name), "wb") as f:
             f.write(serialization.to_bytes(ts.params))
 
-    bbox = SF_REGIONS[region]                        # train region (named neighborhood)
-    print(f"region={region} bbox={bbox}", flush=True)
-    net = load_road_network(bbox=bbox)               # pulls + caches the SF graph
-    x0, y0, x1, y1 = net.bounds()
-    pool = build_route_pool(net, n_routes=routes, seed=seed)
-    # Lagrangian: zero the fixed crash penalty so the adaptive multiplier owns it.
+    # Resolve the active region list.  ``--regions`` takes precedence; fall back
+    # to the legacy ``--region`` flag so single-region runs are unaffected.
+    active_regions: list[str] = (
+        [r.strip() for r in regions.split(",") if r.strip()]
+        if regions
+        else [region]
+    )
+    print(f"regions={active_regions} (round-robin)", flush=True)
+
+    # Build one env per region.  All share the same env shape (agents/peds/caps),
+    # so obs_dim and act_dim are identical — one shared policy works across all.
+    # The first collect on each env triggers a JAX recompile (~1 per region).
     extra = {"w_collision": 0.0} if lagrangian else {}
-    env = K.make_env(pool, (x0, y0), (x1, y1), n_agents=agents, n_peds=n_peds,
-                     max_steps=steps, v_max=vmax, cruise_cap=cruise_cap,
-                     ped_radius=ped_radius, cand_cap_car=cand_cap,
-                     cand_cap_ped=cand_cap, seed=seed, **extra)
+
+    def _build_env(r: str):
+        bbox = SF_REGIONS[r]
+        print(f"  loading region={r} bbox={bbox}", flush=True)
+        net = load_road_network(bbox=bbox)
+        x0, y0, x1, y1 = net.bounds()
+        pool = build_route_pool(net, n_routes=routes, seed=seed)
+        return K.make_env(pool, (x0, y0), (x1, y1), n_agents=agents, n_peds=n_peds,
+                          max_steps=steps, v_max=vmax, cruise_cap=cruise_cap,
+                          ped_radius=ped_radius, cand_cap_car=cand_cap,
+                          cand_cap_ped=cand_cap, seed=seed, **extra)
+
+    env_map: dict[str, object] = {r: _build_env(r) for r in active_regions}
+
+    # Use the first region's env to initialise the train state (obs/act dims are
+    # identical across regions since make_env params match).
+    first_env = env_map[active_regions[0]]
     cfg = ppo.PPOConfig(n_worlds=worlds, encoder=arch)
-    print(f"device={jax.devices()} env: agents={env.n_agents} obs={env.obs_dim} "
-          f"steps={env.max_steps} worlds={cfg.n_worlds}", flush=True)
-    print(f"dual-Lagrangian: crash_target={crash_target} soft_target={effective_soft_target} "
-          f"w_carped={w_carped}", flush=True)
+    print(f"device={jax.devices()} env: agents={first_env.n_agents} "
+          f"obs={first_env.obs_dim} steps={first_env.max_steps} "
+          f"worlds={cfg.n_worlds}", flush=True)
+    print(f"dual-Lagrangian: crash_target={crash_target} "
+          f"soft_target={effective_soft_target} w_carped={w_carped}", flush=True)
 
     key = jax.random.PRNGKey(seed)
     key, kinit = jax.random.split(key)
-    ts = ppo.make_train_state(env, cfg, kinit)
+    ts = ppo.make_train_state(first_env, cfg, kinit)
     save(ts, f"untrained{tag}.msgpack")             # baseline shadow world
     volume.commit()
 
@@ -165,11 +232,17 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
     # toward their respective targets. lam_hard→crash_target (default 0 = zero crashes).
     # lam_soft→soft_target (graded hinges stay bounded). verifier=False disables
     # the verifier relabelling and falls back to the old crash-only path.
+    # Both multipliers are shared/global across all regions (single policy, single
+    # constraint budget).
     history: list[dict] = []
     lam_hard: float = 0.0
     lam_soft: float = 0.0
 
     for it in range(iters):
+        # Round-robin region selection: each iter is pinned to one region's env.
+        iter_region = region_for_iter(it, active_regions)
+        env = env_map[iter_region]
+
         key, kc = jax.random.split(key)
         t0 = time.time()
         batch = ppo.collect(env, ts, kc, cfg.n_worlds)
@@ -201,6 +274,7 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
 
         m = {k: float(v) for k, v in m.items()}
         m["iter"] = it
+        m["region"] = iter_region
         m["sec"] = round(time.time() - t0, 2)
 
         if verifier:
@@ -230,8 +304,8 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
             rate_s = (f"car-car {m.get('car_car_rate', 0):.3f} "
                       f"car-ped {m.get('car_ped_rate', 0):.3f} | "
                       if verifier else "")
-            print(f"it {it:4d} | reward {m['ep_reward']:8.1f} | {lam_s}{cost_s}"
-                  f"{rate_s}crashes/car {m['crashes_per_car']:.2f} | "
+            print(f"it {it:4d} [{iter_region}] | reward {m['ep_reward']:8.1f} | "
+                  f"{lam_s}{cost_s}{rate_s}crashes/car {m['crashes_per_car']:.2f} | "
                   f"goals/agent {m['goals_per_agent']:.2f} | {m['sec']}s", flush=True)
             save(ts, f"trained{tag}.msgpack")        # periodic, so renders mid-run
             with open(os.path.join(CKPT_DIR, f"history{tag}.json"), "w") as f:
@@ -257,10 +331,10 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
 @app.local_entrypoint()
 def main(iters: int = 300, worlds: int = 64, agents: int = 64,
          steps: int = 300, lagrangian: bool = True, verifier: bool = True,
-         cost_target: float = 0.05, region: str = "downtown", tag: str = "",
-         wait: bool = False, n_peds: int = 300, cruise_cap: float = 7.0,
-         ped_radius: float = 3.5, cand_cap: int = 16, seed: int = 0,
-         snapshot_every: int = 50, crash_target: float = 0.0,
+         cost_target: float = 0.05, region: str = "downtown", regions: str = "",
+         tag: str = "", wait: bool = False, n_peds: int = 300,
+         cruise_cap: float = 7.0, ped_radius: float = 3.5, cand_cap: int = 16,
+         seed: int = 0, snapshot_every: int = 50, crash_target: float = 0.0,
          soft_target: float = 0.05, w_carped: float = 3.0,
          arch: str = "deepsets"):
     """Local entrypoint: spawns (or waits on) the remote training function.
@@ -270,6 +344,13 @@ def main(iters: int = 300, worlds: int = 64, agents: int = 64,
       --soft-target   Graded hinge target (default 0.05; mirrors old --cost-target).
       --w-carped      Car-ped weight in hard_cost (default 3.0; car-ped > car-car).
 
+    New flag (v2 Task 5 — multi-region round-robin):
+      --regions       Comma-separated region subset for training, e.g.
+                      "downtown,nopa,chinatown_fidi".  Each iteration is assigned
+                      a region via round-robin; the policy is shared.  Leave-one-out
+                      workflow: train on N-1 regions, eval on the held-out one.
+                      Omit to fall back to single --region (default "downtown").
+
     New flag (v2 Task 6 — selectable encoder):
       --arch          Set encoder: "deepsets" (default) or "attention".
                       Example: modal run -m smoothride.rl.modal_train --arch attention
@@ -277,11 +358,14 @@ def main(iters: int = 300, worlds: int = 64, agents: int = 64,
     Legacy flag (still accepted):
       --cost-target   Maps to --soft-target for backward compat.
     """
+    # Determine the display label for spawn output.
+    active_regions_display = regions if regions else region
+
     kw = dict(iters=iters, worlds=worlds, agents=agents, steps=steps,
               lagrangian=lagrangian, verifier=verifier, cost_target=cost_target,
-              region=region, tag=tag, n_peds=n_peds, cruise_cap=cruise_cap,
-              ped_radius=ped_radius, cand_cap=cand_cap, seed=seed,
-              snapshot_every=snapshot_every, crash_target=crash_target,
+              region=region, regions=regions, tag=tag, n_peds=n_peds,
+              cruise_cap=cruise_cap, ped_radius=ped_radius, cand_cap=cand_cap,
+              seed=seed, snapshot_every=snapshot_every, crash_target=crash_target,
               soft_target=soft_target, w_carped=w_carped, arch=arch)
     if wait:                       # blocking: streams live, dies if the client drops
         print("final metrics:", train.remote(**kw))
@@ -291,9 +375,11 @@ def main(iters: int = 300, worlds: int = 64, agents: int = 64,
     # Launch with `modal run --detach` so the app outlives this client. Checkpoints
     # (saved every 10 iters) land in the volume regardless.
     fc = train.spawn(**kw)
-    print(f"spawned training (call {fc.object_id}); region={region} tag={tag}\n"
+    print(f"spawned training (call {fc.object_id}); "
+          f"regions={active_regions_display} tag={tag}\n"
           f"  dual-Lagrangian: crash_target={crash_target} soft_target={soft_target} "
           f"w_carped={w_carped}\n"
           f"  checkpoints -> volume '{APP_NAME}-ckpts' (untrained{tag}.msgpack / trained{tag}.msgpack)\n"
           f"  versioned snapshots every {snapshot_every} iters -> trained{tag}_it####.msgpack\n"
-          f"  pull when done:  modal volume get {APP_NAME}-ckpts trained{tag}.msgpack runs/trained{tag}.msgpack")
+          f"  pull when done:  modal volume get {APP_NAME}-ckpts trained{tag}.msgpack "
+          f"runs/trained{tag}.msgpack")
