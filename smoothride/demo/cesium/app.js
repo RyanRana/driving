@@ -19,6 +19,7 @@ const CAR_L = 4.6, CAR_W = 2.0, CAR_H = 1.5;   // meters
 let _viewer = null;          // single Cesium.Viewer instance reused across loads
 let _sceneEntityIds = [];    // IDs of entities added for the current scene (cars, peds, roads, buildings)
 let _clockTickListener = null;  // handle for the per-scene onTick subscription
+let _geoJsonBuildingsFallback = false;  // true when OSM Buildings failed; loadScene adds GeoJSON per scene
 
 // ---------------------------------------------------------------------------
 // Bootstrap: create viewer once, then load from manifest or fallback
@@ -51,7 +52,10 @@ async function main() {
   // OSM Buildings (ion) are viewer-level, loaded once.
   if (hasToken) {
     try { _viewer.scene.primitives.add(await Cesium.createOsmBuildingsAsync()); }
-    catch (e) { console.warn("OSM Buildings failed, using per-scene GeoJSON", e); }
+    catch (e) {
+      _geoJsonBuildingsFallback = true;
+      console.warn("OSM Buildings unavailable; falling back to GeoJSON buildings per scene", e);
+    }
   }
 
   // Try to load the manifest; fall back to the legacy single scene path.
@@ -107,10 +111,12 @@ async function loadScene(path) {
   if (scene.schema_version !== 1) throw new Error("unsupported schema " + scene.schema_version);
   const meta = scene.meta, world = scene.worlds[WORLD];
 
-  // Per-scene GeoJSON buildings (only used when ion token is absent, since OSM
-  // Buildings are a viewer-level primitive loaded once in main()).
+  // Per-scene GeoJSON buildings: used when (a) no ion token, or (b) token present
+  // but OSM Buildings failed at startup (_geoJsonBuildingsFallback === true).
+  // OSM Buildings are a viewer-level primitive (loaded once in main()) and must
+  // NOT be double-added here when they loaded successfully.
   const hasToken = !!CFG.cesiumIonToken;
-  if (!hasToken) addGeoJsonBuildings(_viewer, scene);
+  if (!hasToken || _geoJsonBuildingsFallback) addGeoJsonBuildings(_viewer, scene);
 
   drawRoads(_viewer, scene.roads);
 
@@ -163,6 +169,7 @@ async function loadScene(path) {
 // ---------------------------------------------------------------------------
 
 function clearScene() {
+  if (!_viewer) return;   // guard: no-op if called before viewer is initialized
   // Remove only the entities we added for the previous scene.
   _sceneEntityIds.forEach((id) => {
     const entity = _viewer.entities.getById(id);
