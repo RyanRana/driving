@@ -67,15 +67,27 @@ def _cache_path(name: str) -> str:
     return os.path.abspath(os.path.join(CACHE_DIR, name))
 
 
+def _bbox_cache_name(bbox: tuple[float, float, float, float]) -> str:
+    """Deterministic per-bbox cache filename. The cache key MUST depend on the
+    bbox — a fixed name silently returns one region's graph for every bbox, which
+    makes `--region` a no-op (every region resolves to whatever was cached first)."""
+    w, s, e, n = bbox
+    return f"sf_{w:.4f}_{s:.4f}_{e:.4f}_{n:.4f}_drive.graphml"
+
+
 def load_sf_graph(
     bbox: tuple[float, float, float, float] = DOWNTOWN_SF_BBOX,
-    cache_name: str = "sf_downtown_drive.graphml",
+    cache_name: str | None = None,
     refresh: bool = False,
 ) -> nx.MultiDiGraph:
     """Return a drivable SF graph, cached to graphml on first pull.
 
+    The cache filename derives from the bbox unless one is given explicitly, so
+    each region caches separately (otherwise distinct regions collide on one file).
     Speeds and travel times are imputed (OSM lanes/maxspeed are often sparse).
     """
+    if cache_name is None:
+        cache_name = _bbox_cache_name(bbox)
     path = _cache_path(cache_name)
     if os.path.exists(path) and not refresh:
         G = ox.load_graphml(path)
