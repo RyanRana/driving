@@ -2,9 +2,14 @@
 // Map = Cesium World Terrain + OSM Buildings. Cars = procedural GLB models
 // (worldsim/assets: sedan/suv/coupe), each given a RANDOM body + palette color,
 // driven along the exported RL trajectories and oriented by per-frame heading.
+// Default Cesium ion token so the 3D map (World Terrain + OSM Buildings) renders
+// out-of-the-box with no setup. Resolution order: ?ionToken= URL param > a local
+// (git-ignored) config.js > this embedded default. Revoke/rotate at ion.cesium.com.
+const DEFAULT_ION_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI0NGQxMjllNi04MjE2LTQyZGItYWI0NC1iYWNmY2QzYzIxMjMiLCJpZCI6NDQ3MDIxLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoidW5kZWZpbmVkX2RlZmF1bHQiLCJpYXQiOjE3ODE5OTE1NzZ9.8JXp9n3BBFNeOy-mksz2qTYS5NOZohHKmuQgdzzKbdo";
 const TOKEN = new URLSearchParams(location.search).get("ionToken")
   || (window.CESIUM_ION_TOKEN && window.CESIUM_ION_TOKEN !== "PASTE_YOUR_CESIUM_ION_TOKEN"
-        ? window.CESIUM_ION_TOKEN : null);
+        ? window.CESIUM_ION_TOKEN : null)
+  || DEFAULT_ION_TOKEN;
 
 const SF = { lon: -122.4090, lat: 37.7886 };
 const TRAJ_URL = "../web/public/trajectories.json";
