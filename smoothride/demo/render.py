@@ -40,38 +40,35 @@ def rollout(env: K.Env, params, key, sample=True, safe=False, filt="vo"):
     safe=True wraps each action with a runtime safety filter: filt='vo' (velocity
     obstacle / ORCA) or filt='cbf' (higher-order CBF-QP)."""
     from ..rl.networks import ActorCritic
+    from ..rl.ppo import _global_feat
     from ..rl.safety import safe_action
     from ..rl.cbf import cbf_action
-    from ..env import legality as L
     filter_fn = cbf_action if filt == "cbf" else safe_action
     net = ActorCritic(act_dim=env.act_dim)
 
     def step_fn(carry, k):
         st, obs = carry
-        gf = jnp.broadcast_to(obs.mean(-2, keepdims=True), obs.shape)
+        gf = _global_feat(obs)
         mean, log_std, _ = net.apply(params, obs, gf)
         ka, kn = jax.random.split(k)
         action = mean + (jnp.exp(log_std) * jax.random.normal(ka, mean.shape)
                          if sample else 0.0)
         if safe:
             action = filter_fn(env, st, action)
-        # legality of the state we are about to render (pre-step `st`)
-        law = L.evaluate(env, st)
         nst, nobs, r, done, info = K.step(env, st, action, kn)
-        rec = (st.pos, st.heading, st.speed, nst.just_crashed, nst.goals, st.ped_pos,
-               law["off_lane"], law["wrong_way"], law["lateral"])
+        rec = (st.pos, st.heading, st.speed, nst.just_crashed, nst.goals,
+               st.ped_pos, nst.arrived)
         return (nst, nobs), rec
 
     kr, ks = jax.random.split(key)
     st, obs = K.reset(env, kr)
     keys = jax.random.split(ks, env.max_steps)
-    _, (pos, heading, speed, crashed, goals, ped,
-        off_lane, wrong_way, lateral) = jax.lax.scan(step_fn, (st, obs), keys)
+    _, (pos, heading, speed, crashed, goals, ped, arrived) = jax.lax.scan(
+        step_fn, (st, obs), keys)
     return {"pos": np.asarray(pos), "heading": np.asarray(heading),
             "speed": np.asarray(speed), "crashed": np.asarray(crashed),
             "goals": np.asarray(goals), "ped": np.asarray(ped),
-            "off_lane": np.asarray(off_lane), "wrong_way": np.asarray(wrong_way),
-            "lateral": np.asarray(lateral)}
+            "arrived": np.asarray(arrived)}
 
 
 def render(net: RoadNetwork, pos, crashed, goals, ped, out_prefix, title,

@@ -37,12 +37,18 @@ def _lonlat_transformer(net: RoadNetwork) -> Transformer:
     return Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
 
 
+lonlat_transformer = _lonlat_transformer  # public alias
+
+
 def _to_lonlat(net: RoadNetwork, tf: Transformer, xy: np.ndarray):
     """xy (..., 2) in shifted-UTM meters -> (lon, lat) arrays of the same shape."""
     east = xy[..., 0] + net.origin[0]
     north = xy[..., 1] + net.origin[1]
     lon, lat = tf.transform(east, north)
     return np.asarray(lon), np.asarray(lat)
+
+
+to_lonlat = _to_lonlat  # public alias
 
 
 def _roads_geojson(net: RoadNetwork, tf: Transformer) -> list:

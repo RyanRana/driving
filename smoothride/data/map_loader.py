@@ -8,6 +8,7 @@ bicycle model and collision footprints can work in real-world units.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass
 
@@ -15,9 +16,20 @@ import networkx as nx
 import numpy as np
 import osmnx as ox
 
+from . import elevation as _elev
+
 # A small, dense downtown-SF box keeps iteration fast. Order is OSMnx 2.x:
 # bbox = (west, south, east, north) = (left, bottom, right, top).
 DOWNTOWN_SF_BBOX = (-122.4180, 37.7820, -122.4000, 37.7950)
+
+# Named SF neighborhoods (same W,S,E,N convention) for train/eval on distinct,
+# non-overlapping regions — lets us test generalization (train one, validate another).
+SF_REGIONS = {
+    "downtown": DOWNTOWN_SF_BBOX,
+    "chinatown_fidi": (-122.4090, 37.7890, -122.3970, 37.7990),   # Chinatown + Financial District
+    "mission": (-122.4230, 37.7480, -122.4070, 37.7640),          # Mission District
+    "nopa": (-122.4450, 37.7680, -122.4270, 37.7810),             # Western Addition / NoPa
+}
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data_cache")
 
@@ -34,6 +46,8 @@ class RoadNetwork:
     edge_speed_kph: np.ndarray      # (E,) speed limit (imputed where missing)
     G: nx.MultiDiGraph              # the projected graph (for routing / Dijkstra)
     origin: tuple[float, float]     # (x0, y0) subtracted to keep coords small
+    node_z: np.ndarray | None = None        # (N,) elevation (m), None until attached
+    edge_grade: np.ndarray | None = None    # (E,) rise/run, None until attached
 
     @property
     def n_nodes(self) -> int:
@@ -53,15 +67,27 @@ def _cache_path(name: str) -> str:
     return os.path.abspath(os.path.join(CACHE_DIR, name))
 
 
+def _bbox_cache_name(bbox: tuple[float, float, float, float]) -> str:
+    """Deterministic per-bbox cache filename. The cache key MUST depend on the
+    bbox — a fixed name silently returns one region's graph for every bbox, which
+    makes `--region` a no-op (every region resolves to whatever was cached first)."""
+    w, s, e, n = bbox
+    return f"sf_{w:.4f}_{s:.4f}_{e:.4f}_{n:.4f}_drive.graphml"
+
+
 def load_sf_graph(
     bbox: tuple[float, float, float, float] = DOWNTOWN_SF_BBOX,
-    cache_name: str = "sf_downtown_drive.graphml",
+    cache_name: str | None = None,
     refresh: bool = False,
 ) -> nx.MultiDiGraph:
     """Return a drivable SF graph, cached to graphml on first pull.
 
+    The cache filename derives from the bbox unless one is given explicitly, so
+    each region caches separately (otherwise distinct regions collide on one file).
     Speeds and travel times are imputed (OSM lanes/maxspeed are often sparse).
     """
+    if cache_name is None:
+        cache_name = _bbox_cache_name(bbox)
     path = _cache_path(cache_name)
     if os.path.exists(path) and not refresh:
         G = ox.load_graphml(path)
@@ -116,6 +142,27 @@ def to_road_network(G: nx.MultiDiGraph) -> RoadNetwork:
         G=Gp,
         origin=origin,
     )
+
+
+def attach_elevation(net: RoadNetwork, source: str = "3dep") -> RoadNetwork:
+    """Return a NEW RoadNetwork with node_z + edge_grade populated.
+
+    source="synthetic" uses a deterministic offline hill field (tests / no net).
+    source="3dep" samples real USGS 3DEP at each node (needs network + net.G crs).
+    """
+    if source == "synthetic":
+        node_z = _elev.synthetic_elevation(net.node_xy)
+    elif source == "3dep":
+        from pyproj import Transformer
+        tf = Transformer.from_crs(net.G.graph["crs"], "EPSG:4326", always_xy=True)
+        east = net.node_xy[:, 0] + net.origin[0]
+        north = net.node_xy[:, 1] + net.origin[1]
+        lon, lat = tf.transform(east, north)
+        node_z = _elev.fetch_node_elevation(np.column_stack([lon, lat]))
+    else:
+        raise ValueError(f"unknown elevation source: {source!r}")
+    grade = _elev.edge_grades(node_z, net.edges, net.edge_length)
+    return dataclasses.replace(net, node_z=node_z, edge_grade=grade)
 
 
 def load_road_network(**kwargs) -> RoadNetwork:

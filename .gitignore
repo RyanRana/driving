@@ -12,9 +12,24 @@ runs/
 # local Mapbox token (not committed)
 smoothride/demo/web/config.js
 
+# local Cesium ion token + generated scene (not committed)
+smoothride/demo/cesium/config.js
+smoothride/demo/cesium/public/
+
 # generated cache & build metadata
 cache/
 *.egg-info/
-smoothride/demo/cesium/config.js
 jax_cache/
 data_cache/*.json
+
+# local browser-testing artifacts (Cesium viewer smoke screenshots)
+.playwright-mcp/
+smoothride-*.png
+proof-*.png
+arrival-*.png
+main-cesium-*.png
+
+# test/coverage caches
+.coverage
+.pytest_cache/
+runs_demo/
