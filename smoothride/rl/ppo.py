@@ -184,6 +184,94 @@ def verifier_cost(
     return cost_hard.reshape(B, T, N), cost_soft.reshape(B, T, N)
 
 
+def verifier_costs_split(
+    env: K.Env,
+    batch,
+    w_carped: float = 3.0,
+) -> dict[str, np.ndarray]:
+    """Relabel a rollout into PER-CONSTRAINT cost channels (PID-Lagrangian exp).
+
+    Same host-side geometry gather + rule predicates as :func:`verifier_cost`,
+    but instead of lumping everything into two channels (hard / soft) it returns
+    one array per constraint so a separate Lagrange multiplier can price each.
+    Pricing the safety-critical car-risk and ped-yield hinges independently of
+    lane discipline is the core of the experiment.
+
+    Channels (each ``(B, T, N)`` float32, all non-negative):
+      * ``car_crash`` — binary car-car collision, weighted ``w_carcar=1.0``.
+      * ``ped_hit``   — binary car-ped collision, weighted ``w_carped``.
+      * ``car_risk``  — graded car-proximity hinge.
+      * ``ped_yield`` — graded pedestrian-yield hinge.
+      * ``lane``      — lane discipline = ``off_lane + wrong_way + over_cap``.
+
+    The two binary channels carry the SAME weighting as
+    :func:`verifier_cost`'s ``cost_hard`` so the hard targets stay comparable to
+    the champion; ``car_risk + ped_yield + lane`` partition exactly equals
+    :func:`verifier_cost`'s ``cost_soft``.
+
+    Args:
+        env: The kinematic environment (owns route geometry).
+        batch: Collected rollout dict (same keys :func:`verifier_cost` reads).
+        w_carped: Weight on the car-ped binary term (default 3.0).
+
+    Returns:
+        ``dict[str, np.ndarray]`` keyed by the five channel names above, each
+        of shape ``(B, T, N)``.
+    """
+    import numpy as np
+
+    from .verifier import step_cost_components
+
+    rxy = np.asarray(env.routes_xy)
+    rlanes = np.asarray(env.routes_lanes)
+    rspeed = np.asarray(env.routes_speed)
+    ri = np.asarray(batch["route_idx"])          # (B, T, N)
+    wp = np.asarray(batch["wp_ptr"])
+    B, T, N = ri.shape
+    seg_start = rxy[ri, np.maximum(wp - 1, 0)]
+    seg_end = rxy[ri, wp]
+    lane_count = rlanes[ri, wp]
+    speed_limit = rspeed[ri, wp]
+
+    def r2(x):                                   # (B,T,...) -> (B*T,...)
+        return x.reshape((B * T,) + x.shape[2:])
+
+    pp = r2(np.asarray(batch["ped_pos"]))
+    pc = r2(np.asarray(batch["ped_crossing"]))
+    car_crashed_bt = r2(np.asarray(batch["car_crash"]))
+    ped_hit_bt = r2(np.asarray(batch["ped_hit"]))
+
+    components = step_cost_components(
+        r2(np.asarray(batch["pos"])),
+        r2(seg_start), r2(seg_end), r2(lane_count),
+        float(env.lane_width),
+        r2(np.asarray(batch["heading"])),
+        r2(np.asarray(batch["speed"])),
+        r2(np.asarray(batch["spawn_grace"])),
+        car_crashed_bt, ped_hit_bt,
+        r2(speed_limit),
+        ped_pos=pp, ped_crossing=pc,
+        r_ped=float(env.ped_radius),
+        r_yield=float(env.r_yield),
+        cruise_cap=float(env.cruise_cap),
+        r_risk=7.0,
+        collision_radius=float(env.collision_radius),
+    )
+
+    def rs(x):                                   # (B*T, N) -> (B, T, N)
+        return x.reshape(B, T, N)
+
+    lane = (components["off_lane"] + components["wrong_way"]
+            + components["over_cap"])
+    return {
+        "car_crash": rs(components["car_crash"]),
+        "ped_hit": rs(w_carped * components["ped_hit"]),
+        "car_risk": rs(components["car_risk"]),
+        "ped_yield": rs(components["ped_yield"]),
+        "lane": rs(lane.astype(np.float32)),
+    }
+
+
 def compute_gae(reward, value, last_value, gamma, lam):
     """reward/value: (T, N). last_value: (N,). One episode ending at horizon."""
     def scan_fn(carry, x):
@@ -209,23 +297,31 @@ def update(
     lam_hard: float = 0.0,
     lam_soft: float = 0.0,
     lam: float = 0.0,
+    penalty=None,
 ):
-    """PPO parameter update with dual-Lagrangian cost penalisation.
+    """PPO parameter update with (optionally pre-assembled) cost penalisation.
+
+    The effective reward is ``reward - penalty`` where ``penalty`` is, in
+    priority order:
+      1. the explicit ``penalty`` array, if provided (PID-Lagrangian path:
+         caller assembles ``Σ_k lam_k * cost_k`` per-constraint off-device);
+      2. ``lam_hard*cost_hard + lam_soft*cost_soft`` (dual-channel path) when
+         both channels are in ``batch``;
+      3. ``lam*batch["cost"]`` (legacy single-channel path).
 
     Args:
         env: Kinematic environment (static; provides geometry for shapes only).
         cfg: PPO hyper-parameters (frozen dataclass; JIT-static).
         ts: Current :class:`flax.training.train_state.TrainState`.
-        batch: Rollout dict produced by :func:`collect`.  Must contain
-            ``cost_hard`` and ``cost_soft`` arrays of shape ``(B, T, N)``
-            (set by the caller after :func:`verifier_cost`).
+        batch: Rollout dict produced by :func:`collect`.
         lam_hard: Lagrange multiplier for the *hard* (binary collision) cost
             channel.  Updated externally by dual ascent toward crash_target.
         lam_soft: Lagrange multiplier for the *soft* (graded hinge) cost
             channel.  Updated externally by dual ascent toward soft_target.
         lam: Deprecated single-channel multiplier kept for backward compat.
-            When ``cost_hard``/``cost_soft`` are absent, falls back to
-            ``batch["cost"]`` weighted by ``lam``.
+        penalty: Optional precomputed ``(B, T, N)`` penalty array.  When given,
+            ``reward_eff = batch["reward"] - penalty`` and the lam_* args are
+            ignored.  This is the PID-Lagrangian per-constraint path.
 
     Returns:
         ``(ts_new, metrics)`` where metrics is a dict of finite scalars.
@@ -238,10 +334,13 @@ def update(
             in_axes=(1, 1, 0), out_axes=1)(reward, value, last_value)
         return adv, ret
 
-    # Dual-channel PPO-Lagrangian: penalise hard (binary collisions) and soft
-    # (graded hinges + lane) separately. Falls back to legacy single-lam if the
-    # dual channels aren't in the batch (backward compat).
-    if "cost_hard" in batch and "cost_soft" in batch:
+    # Penalty selection (priority order):
+    #   1. explicit per-constraint penalty (PID-Lagrangian: Σ_k lam_k*cost_k);
+    #   2. dual-channel hard/soft;
+    #   3. legacy single-lam.
+    if penalty is not None:
+        reward_eff = batch["reward"] - penalty
+    elif "cost_hard" in batch and "cost_soft" in batch:
         reward_eff = (batch["reward"]
                       - lam_hard * batch["cost_hard"]
                       - lam_soft * batch["cost_soft"])

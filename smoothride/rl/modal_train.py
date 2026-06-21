@@ -135,7 +135,8 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
           regions: str = "", tag: str = "", n_peds: int = 300, cruise_cap: float = 7.0,
           ped_radius: float = 3.5, cand_cap: int = 16,
           snapshot_every: int = 50, soft_target: float = 0.05,
-          w_carped: float = 3.0, arch: str = "deepsets") -> dict:
+          w_carped: float = 3.0, arch: str = "deepsets",
+          controller: str = "integral") -> dict:
     """Train the shared-weight nav policy; write {untrained,trained}{tag}.msgpack
     to the volume. Returns the final-iteration metrics dict.
 
@@ -177,6 +178,7 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
     from smoothride.env import kinematic as K
     from smoothride.env.routing import build_route_pool
     from smoothride.rl import ppo
+    from smoothride.rl.pid_lagrangian import CHANNEL_SPEC, PIDState, pid_step
 
     # --cost-target is the legacy alias for --soft-target; honour it if explicitly set.
     effective_soft_target = soft_target if soft_target != 0.05 else cost_target
@@ -238,6 +240,17 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
     lam_hard: float = 0.0
     lam_soft: float = 0.0
 
+    # PID-Lagrangian controller (experiment): one controller state per
+    # per-constraint channel. Targets are resolved per channel: "zero" channels
+    # (binary collisions) track crash_target; "soft" channels (graded hinges +
+    # lane) track soft_target. Pure-integral path leaves pid_states unused.
+    use_pid = controller == "pid"
+    pid_states: dict[str, PIDState] = {ch: PIDState() for ch in CHANNEL_SPEC}
+    channel_targets = {"zero": crash_target, "soft": effective_soft_target}
+    if use_pid:
+        print("controller=pid (PID-Lagrangian, per-constraint multipliers): "
+              f"channels={list(CHANNEL_SPEC)}", flush=True)
+
     for it in range(iters):
         # Round-robin region selection: each iter is pinned to one region's env.
         iter_region = region_for_iter(it, active_regions)
@@ -247,7 +260,33 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
         t0 = time.time()
         batch = ppo.collect(env, ts, kc, cfg.n_worlds)
 
-        if verifier:
+        channel_means: dict[str, float] = {}
+        channel_lams: dict[str, float] = {}
+        if verifier and use_pid:
+            # PID-Lagrangian per-constraint path: split cost into channels, drive
+            # one PID controller per channel, assemble penalty = Σ_k lam_k*cost_k.
+            channels = ppo.verifier_costs_split(env, batch, w_carped=w_carped)
+            penalty = None
+            for ch, cost_k in channels.items():
+                mean_k = float(cost_k.mean())
+                channel_means[ch] = mean_k
+                gains, tgt_key = CHANNEL_SPEC[ch]
+                if lagrangian:
+                    lam_k, pid_states[ch] = pid_step(
+                        pid_states[ch], mean_k, channel_targets[tgt_key], gains,
+                    )
+                else:
+                    lam_k = 0.0
+                channel_lams[ch] = lam_k
+                term = lam_k * cost_k
+                penalty = term if penalty is None else penalty + term
+            # Report aggregate hard/soft means for log continuity with the champion.
+            mean_hard = channel_means["car_crash"] + channel_means["ped_hit"]
+            mean_soft = (channel_means["car_risk"] + channel_means["ped_yield"]
+                         + channel_means["lane"])
+            # Keep raw flags in batch for car_ped_rate / car_car_rate logging.
+            ts, m = ppo.update(env, cfg, ts, batch, penalty=penalty)
+        elif verifier:
             cost_hard, cost_soft = ppo.verifier_cost(
                 env, batch, w_carped=w_carped,
             )                                        # each (B,T,N), off-device
@@ -264,8 +303,6 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
                 lam_soft = float(
                     min(400.0, max(0.0, lam_soft + 2.0 * (mean_soft - effective_soft_target)))
                 )
-
-        if verifier:
             ts, m = ppo.update(env, cfg, ts, batch,
                                lam_hard=lam_hard if lagrangian else 0.0,
                                lam_soft=lam_soft if lagrangian else 0.0)
@@ -289,15 +326,26 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
                 float(_np.asarray(batch["car_crash"]).mean()), 4
             )
 
-        if lagrangian:
+        if lagrangian and use_pid:
+            # Log every per-constraint λ and mean cost.
+            for ch in CHANNEL_SPEC:
+                m[f"lam_{ch}"] = round(channel_lams.get(ch, 0.0), 2)
+                m[f"cost_{ch}"] = round(channel_means.get(ch, 0.0), 5)
+        elif lagrangian:
             m["lam_hard"] = round(lam_hard, 2)
             m["lam_soft"] = round(lam_soft, 2)
 
         history.append(m)
 
         if it % 10 == 0 or it == iters - 1:
-            lam_s = (f"lam_h {lam_hard:6.2f} lam_s {lam_soft:6.2f} | "
-                     if lagrangian else "")
+            if lagrangian and use_pid:
+                lam_s = (
+                    "lam[cc {car_crash:5.1f} ph {ped_hit:5.1f} cr {car_risk:5.1f} "
+                    "py {ped_yield:5.1f} ln {lane:5.1f}] | ".format(**channel_lams)
+                )
+            else:
+                lam_s = (f"lam_h {lam_hard:6.2f} lam_s {lam_soft:6.2f} | "
+                         if lagrangian else "")
             cost_s = (f"hard {m.get('cost_hard', 0):.3f} "
                       f"soft {m.get('cost_soft', 0):.3f} | "
                       if verifier else "")
@@ -336,7 +384,7 @@ def main(iters: int = 300, worlds: int = 64, agents: int = 64,
          cruise_cap: float = 7.0, ped_radius: float = 3.5, cand_cap: int = 16,
          seed: int = 0, snapshot_every: int = 50, crash_target: float = 0.0,
          soft_target: float = 0.05, w_carped: float = 3.0,
-         arch: str = "deepsets"):
+         arch: str = "deepsets", controller: str = "integral"):
     """Local entrypoint: spawns (or waits on) the remote training function.
 
     New flags (v2 Task 3 — dual-Lagrangian):
@@ -355,6 +403,12 @@ def main(iters: int = 300, worlds: int = 64, agents: int = 64,
       --arch          Set encoder: "deepsets" (default) or "attention".
                       Example: modal run -m smoothride.rl.modal_train --arch attention
 
+    New flag (experiment — PID-Lagrangian per-constraint multipliers):
+      --controller    "integral" (default; champion pure-integral dual ascent,
+                      two lumped channels) or "pid" (Stooke et al. PID controller
+                      with one multiplier per constraint: car_crash, ped_hit,
+                      car_risk, ped_yield, lane).
+
     Legacy flag (still accepted):
       --cost-target   Maps to --soft-target for backward compat.
     """
@@ -366,7 +420,8 @@ def main(iters: int = 300, worlds: int = 64, agents: int = 64,
               region=region, regions=regions, tag=tag, n_peds=n_peds,
               cruise_cap=cruise_cap, ped_radius=ped_radius, cand_cap=cand_cap,
               seed=seed, snapshot_every=snapshot_every, crash_target=crash_target,
-              soft_target=soft_target, w_carped=w_carped, arch=arch)
+              soft_target=soft_target, w_carped=w_carped, arch=arch,
+              controller=controller)
     if wait:                       # blocking: streams live, dies if the client drops
         print("final metrics:", train.remote(**kw))
         return
