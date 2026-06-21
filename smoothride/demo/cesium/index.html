@@ -9,6 +9,7 @@
   <script>window.CESIUM_BASE_URL = "https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/";</script>
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+  <link href="style.css" rel="stylesheet" />
 
   <style>
     html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
@@ -20,6 +21,20 @@
 </head>
 <body>
   <div id="cesiumContainer"></div>
+
+  <!-- live fleet tracker (populated by app.js on every clock tick) -->
+  <div id="hud">
+    <div class="panel trained">
+      <div class="phead"><span class="dot full"></span> Live fleet</div>
+      <div class="row hi"><span>Trips done</span><b id="m-trips">0</b></div>
+      <div class="row"><span>Cars</span><b id="m-cars">0</b></div>
+      <div class="row"><span>Moving</span><b id="m-moving">0</b></div>
+      <div class="row"><span>Crashes</span><b id="m-crashes">0</b></div>
+      <div class="row"><span>Avg speed</span><b id="m-speed">0 mph</b></div>
+      <div class="row"><span>Time</span><b id="m-time">0s</b></div>
+    </div>
+  </div>
+
   <div id="msg"></div>
   <script src="config.js" onerror="window.__noConfig=true"></script>
   <script src="cesium-murals.js"></script>

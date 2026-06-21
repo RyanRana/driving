@@ -264,9 +264,11 @@ def simulate(lanes, s0, dt, n_steps):
     out_pos = np.zeros((n_steps, N, 2), np.float32)
     out_hdg = np.zeros((n_steps, N), np.float32)
     out_spd = np.zeros((n_steps, N), np.float32)
+    out_arr = np.zeros((n_steps, N), np.int8)        # 1 once a car reaches its goal
 
     s = [float(x) for x in s0]
     v = [lanes[i].vcap(s[i]) for i in range(N)]
+    arrived = [False] * N
 
     # spawn separation: push each car forward until its start footprint is clear
     occ0: dict[tuple[int, int], int] = {}
@@ -303,10 +305,13 @@ def simulate(lanes, s0, dt, n_steps):
             v[i] = adv / dt
             p = ln.pos(s[i]); hd = ln.heading(s[i])
             out_pos[t, i] = p; out_hdg[t, i] = hd; out_spd[t, i] = v[i]
+            if s[i] >= ln.total - 0.5:        # reached destination -> trip complete
+                arrived[i] = True
             for c in _footprint(p, hd):                            # claim new cells
                 occ[c] = i
+        out_arr[t] = arrived
         occ0 = occ
-    return out_pos, out_hdg, out_spd
+    return out_pos, out_hdg, out_spd, out_arr
 
 
 def main():
@@ -326,12 +331,15 @@ def main():
     rng = np.random.default_rng(args.seed)
     tf = Transformer.from_crs(net.G.graph["crs"], "EPSG:4326", always_xy=True)
 
-    horizon = args.speed * args.steps * args.dt          # straight-line distance a car can cover
+    horizon = args.speed * args.steps * args.dt          # distance a free car covers in the clip
     lanes, s0 = [], []
     for i in range(args.cars):
         start = int(rng.choice(starts))
-        # enough road for the whole clip + a head-start offset so cars spread out
-        node_path = random_walk(adj, start, horizon * 1.4 + 120, net.node_xy, rng)
+        # VARIED trip length (35-90% of the clip's road) + staggered starts: cars
+        # finish at different times, so the trip counter climbs steadily across the
+        # whole loop and the streets never empty out all at once.
+        node_path = random_walk(adj, start, horizon * rng.uniform(0.35, 0.9) + 60,
+                                net.node_xy, rng)
         if len(node_path) < 3:
             continue
         center = net.node_xy[node_path]                  # centerline (meters)
@@ -340,9 +348,9 @@ def main():
         poly = densify(poly)
         ln = Lane(poly, curvature_speed(poly, args.speed))
         lanes.append(ln)
-        s0.append(float(rng.uniform(0, max(1.0, ln.total - horizon))))  # stagger spawns
+        s0.append(float(rng.uniform(0, max(1.0, ln.total * 0.4))))     # stagger spawns
 
-    pos, head, spd = simulate(lanes, s0, args.dt, args.steps)   # joint: no crashes
+    pos, head, spd, arr = simulate(lanes, s0, args.dt, args.steps)   # joint: no crashes
 
     cars = []
     for i in range(len(lanes)):
@@ -353,7 +361,9 @@ def main():
             "hdg": [round(float(h), 4) for h in head[:, i]],   # rad CCW from east
             "spd": [round(float(s), 2) for s in spd[:, i]],
             "crash": [0] * args.steps,
+            "arr": [int(a) for a in arr[:, i]],                # 1 once trip complete
         })
+    trips_series = [int(arr[t].sum()) for t in range(args.steps)]   # cumulative arrivals
 
     # map center for the camera (graph bbox middle -> lon/lat)
     x0, y0, x1, y1 = net.bounds()
@@ -362,14 +372,17 @@ def main():
     data = {
         "meta": {"dt": args.dt, "n_steps": args.steps, "vmax": args.speed,
                  "center": [round(float(clon[0]), 6), round(float(clat[0]), 6)],
-                 "source": "lane-geometric"},
-        "worlds": {"trained": {"cars": cars}},
+                 "source": "lane-geometric", "trips_series": trips_series},
+        "worlds": {"trained": {"cars": cars,
+                               "summary": {"cars": len(cars),
+                                           "trips_end": trips_series[-1] if trips_series else 0}}},
     }
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(data, f, separators=(",", ":"))
     kb = os.path.getsize(args.out) / 1024
-    print(f"cars={len(cars)} steps={args.steps} dt={args.dt} -> {args.out} ({kb:.0f} KB)")
+    print(f"cars={len(cars)} steps={args.steps} dt={args.dt} trips_end={trips_series[-1]} "
+          f"-> {args.out} ({kb:.0f} KB)")
 
 
 if __name__ == "__main__":

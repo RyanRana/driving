@@ -302,6 +302,41 @@ function addFleet(viewer, DATA) {
         disableDepthTestDistance: Number.POSITIVE_INFINITY },
     });
   });
+
+  setupHUD(viewer, DATA, start, DT, NF);
+}
+
+// Live tracker: recompute fleet metrics for the CURRENT frame on each clock tick.
+//   Trips  = cumulative cars that have reached their destination (meta.trips_series,
+//            else summed from per-car arr flags).
+//   Cars   = fleet size.  Moving = cars with speed > 0.5 m/s.
+//   Crashes= cars whose crash flag is set this frame.  Avg speed of the movers.
+function setupHUD(viewer, DATA, start, dt, nf) {
+  const cars = DATA.worlds.trained.cars;
+  const trips = (DATA.meta && DATA.meta.trips_series) || null;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set("m-cars", cars.length);
+
+  const update = () => {
+    const f = Math.max(0, Math.min(nf - 1, Math.round(
+      Cesium.JulianDate.secondsDifference(viewer.clock.currentTime, start) / dt)));
+    let moving = 0, crashes = 0, sumSpd = 0;
+    for (const c of cars) {
+      const sp = c.spd ? c.spd[f] : 0;
+      if (sp > 0.5) { moving++; sumSpd += sp; }
+      if (c.crash && c.crash[f]) crashes++;
+    }
+    const done = trips ? trips[f]
+      : cars.reduce((n, c) => n + (c.arr && c.arr[f] ? 1 : 0), 0);
+    const mph = moving ? (sumSpd / moving) * 2.23694 : 0;
+    set("m-trips", done);
+    set("m-moving", moving);
+    set("m-crashes", crashes);
+    set("m-speed", mph.toFixed(0) + " mph");
+    set("m-time", (f * dt).toFixed(0) + "s");
+  };
+  viewer.clock.onTick.addEventListener(update);
+  update();
 }
 
 boot();
