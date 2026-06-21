@@ -13,6 +13,9 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 import numpy as np
 
+# Number of polyline points per pedestrian path (start + 3 legs).
+N_PED_POINTS: int = 4
+
 
 @dataclass(frozen=True)
 class PedPaths:
@@ -53,26 +56,28 @@ def build_ped_paths(
     """
     rng = np.random.default_rng(seed)
     R = routes_xy.shape[0]
-    paths = np.zeros((n_peds, 4, 2), np.float32)
+    paths = np.zeros((n_peds, N_PED_POINTS, 2), np.float32)
     for m in range(n_peds):
         r = int(rng.integers(0, R))
         nwp = max(int(routes_n[r]), 2)
-        w = int(rng.integers(0, nwp - 1))           # segment [w, w+1]
-        a, b = routes_xy[r, w], routes_xy[r, w + 1]
-        u = b - a
-        u = u / (np.linalg.norm(u) + 1e-6)          # along-segment unit
-        nrm = np.array([u[1], -u[0]], np.float32)   # right-normal
+        w = int(rng.integers(0, nwp - 1))                        # segment [w, w+1]
+        # Cast endpoints to float32 up front so all geometry stays in float32.
+        a = routes_xy[r, w].astype(np.float32)
+        b = routes_xy[r, w + 1].astype(np.float32)
+        u = b - a                                                 # float32 delta
+        u = u / (np.linalg.norm(u).astype(np.float32) + np.float32(1e-6))
+        nrm = np.array([u[1], -u[0]], np.float32)                # right-normal
         lanes = max(int(routes_lanes[r, w]), 1)
-        half = lanes * lane_width / 2.0
-        s = half + sidewalk_offset                  # sidewalk distance from centreline
-        side = 1.0 if rng.random() < 0.5 else -1.0
-        mid = (a + b) / 2.0
-        p0 = mid + nrm * (s * side)                 # near sidewalk
-        p1 = p0 + u * run_len                       # walk along sidewalk
-        p2 = p1 - nrm * (2.0 * s * side)            # CROSS to far sidewalk (leg 1->2)
-        p3 = p2 + u * run_len                       # walk along far sidewalk
-        paths[m] = np.stack([p0, p1, p2, p3]).astype(np.float32)
-    seg = np.linalg.norm(np.diff(paths, axis=1), axis=-1)          # (M, 3)
+        half = np.float32(lanes * lane_width / 2.0)
+        s = half + np.float32(sidewalk_offset)                   # sidewalk dist
+        side = np.float32(1.0 if rng.random() < 0.5 else -1.0)
+        mid = (a + b) * np.float32(0.5)
+        p0 = mid + nrm * (s * side)                              # near sidewalk
+        p1 = p0 + u * np.float32(run_len)                        # walk sidewalk
+        p2 = p1 - nrm * (np.float32(2.0) * s * side)            # CROSS (leg 1->2)
+        p3 = p2 + u * np.float32(run_len)                        # far sidewalk
+        paths[m] = np.stack([p0, p1, p2, p3])
+    seg = np.linalg.norm(np.diff(paths, axis=1), axis=-1).astype(np.float32)
     cum = np.concatenate(
         [np.zeros((n_peds, 1), np.float32), np.cumsum(seg, axis=1)],
         axis=1,
@@ -97,8 +102,8 @@ def arc_interp(
     """Batched position along each polyline at arc length ``walked``. Clamped to ends.
 
     Args:
-        paths: (M, 4, 2) polyline points.
-        cum:   (M, 4) cumulative arc lengths (cum[:, 0] == 0).
+        paths: (M, N_PED_POINTS, 2) polyline points.
+        cum:   (M, N_PED_POINTS) cumulative arc lengths (cum[:, 0] == 0).
         walked: (M,) arc lengths to interpolate at.
 
     Returns:
@@ -106,12 +111,14 @@ def arc_interp(
     """
     total = cum[:, -1]
     s = jnp.clip(walked, 0.0, total)
-    # segment index: number of cumulative breakpoints strictly <= s after index 0,
-    # clamped to [0, n_seg - 1] so we never index out of bounds.
+    # Count breakpoints (columns 1..) where cum < s (strict less-than).
+    # Using strict `<` means a zero-length segment (cum[k] == cum[k+1]) is never
+    # counted unless s has genuinely advanced past it, so coincident waypoints
+    # cannot push the index onto a later segment when walked==0.
     seg = jnp.clip(
-        jnp.sum(cum[:, 1:] <= s[:, None], axis=1),
+        jnp.sum(cum[:, 1:] < s[:, None], axis=1),
         0,
-        paths.shape[1] - 2,
+        N_PED_POINTS - 2,
     )
     lo = jnp.take_along_axis(cum, seg[:, None], axis=1)[:, 0]       # (M,)
     hi = jnp.take_along_axis(cum, (seg + 1)[:, None], axis=1)[:, 0]

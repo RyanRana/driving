@@ -50,6 +50,25 @@ def test_arc_interp_endpoints_and_midpoint(simple_net):
     at_end = arc_interp(paths, cum, cum[:, -1] + 100.0)
     np.testing.assert_allclose(np.asarray(at_start), p.paths[:, 0, :], atol=1e-4)
     np.testing.assert_allclose(np.asarray(at_end), p.paths[:, -1, :], atol=1e-4)
-    # halfway along total arc length lies on the polyline (finite, within bbox)
-    mid = arc_interp(paths, cum, cum[:, -1] * 0.5)
-    assert np.all(np.isfinite(np.asarray(mid)))
+    # halfway along total arc length: assert geometrically correct interpolation.
+    half_walked = cum[:, -1] * 0.5
+    mid = arc_interp(paths, cum, half_walked)
+    mid_np = np.asarray(mid)
+    assert np.all(np.isfinite(mid_np))
+
+    # Compute expected midpoint analytically for each ped.
+    # Find segment index and fractional position from the numpy arrays directly.
+    p_np = np.asarray(paths)
+    c_np = np.asarray(cum)
+    hw_np = np.asarray(half_walked)
+    expected = np.zeros((p_np.shape[0], 2), np.float32)
+    for i in range(p_np.shape[0]):
+        s_val = hw_np[i]
+        # segment: last index where cum < s (strict), clamped to [0, n_seg-1]
+        seg_i = int(np.clip(np.sum(c_np[i, 1:] < s_val), 0, p_np.shape[1] - 2))
+        lo_i, hi_i = c_np[i, seg_i], c_np[i, seg_i + 1]
+        frac_i = float(np.clip((s_val - lo_i) / (hi_i - lo_i + 1e-6), 0.0, 1.0))
+        expected[i] = p_np[i, seg_i] + frac_i * (p_np[i, seg_i + 1] - p_np[i, seg_i])
+
+    np.testing.assert_allclose(mid_np, expected, atol=1e-4,
+                               err_msg="arc_interp midpoint does not match expected interpolated coordinate")
