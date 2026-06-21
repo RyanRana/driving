@@ -46,6 +46,8 @@ class Env:
     ncy: int = struct.field(pytree_node=False, default=1)
     cand_C: int = struct.field(pytree_node=False, default=144)
     spread_spawn: bool = struct.field(pytree_node=False, default=True)
+    spawn_sep: float = struct.field(pytree_node=False, default=6.0)    # min car-car spawn gap, m
+    spawn_tries: int = struct.field(pytree_node=False, default=12)     # reject-sampling rounds
     dt: float = struct.field(pytree_node=False, default=0.2)
     v_max: float = struct.field(pytree_node=False, default=16.0)
     accel_max: float = struct.field(pytree_node=False, default=3.0)
@@ -219,11 +221,66 @@ def _ped_step(env: Env, st: State, key):
     return ped_pos, _wrap(ped_dir)
 
 
-def reset(env: Env, key: jax.Array):
-    kr, kp, kpd, kf = jax.random.split(key, 4)
+def _place_cars(env: Env, key: jax.Array):
+    """Spawn cars on routes with NO two within env.spawn_sep. Bounded reject-sampling:
+    each round, any car closer than spawn_sep to a lower-indexed car is re-spawned on
+    a fresh random route/slot. Converges for feasible densities; spawn_grace covers any
+    rare residual so a leftover near-miss still isn't counted as a crash."""
     n = env.n_agents
-    route_idx = jax.random.randint(kr, (n,), 0, env.routes_xy.shape[0])
-    pos, heading, wp = _entry_spawn(env, route_idx, kf)
+    n_routes = env.routes_xy.shape[0]
+    idx = jnp.arange(n)
+    lower = idx[:, None] > idx[None, :]      # (n,n) True where m < j
+
+    def sample(k):
+        ka, kb = jax.random.split(k)
+        ridx = jax.random.randint(ka, (n,), 0, n_routes)
+        pos, head, wp = _entry_spawn(env, ridx, kb)
+        return ridx, pos, head, wp
+
+    def body(_, carry):
+        key, ridx, pos, head, wp = carry
+        d = jnp.linalg.norm(pos[:, None, :] - pos[None, :, :], axis=-1)
+        conflict = jnp.any((d < env.spawn_sep) & lower, axis=1)        # move the later car
+        key, ks = jax.random.split(key)
+        ridx2, pos2, head2, wp2 = sample(ks)
+        ridx = jnp.where(conflict, ridx2, ridx)
+        pos = jnp.where(conflict[:, None], pos2, pos)
+        head = jnp.where(conflict, head2, head)
+        wp = jnp.where(conflict, wp2, wp)
+        return key, ridx, pos, head, wp
+
+    key, k0 = jax.random.split(key)
+    carry = (key, *sample(k0))
+    _, ridx, pos, head, wp = jax.lax.fori_loop(0, env.spawn_tries, body, carry)
+    return ridx, pos, head, wp
+
+
+def _place_peds(env: Env, key: jax.Array, car_pos):
+    """Place pedestrians uniformly but never within (ped+collision) radius of a car."""
+    m = env.n_peds
+    sep = env.ped_radius + env.collision_radius
+
+    def sample(k):
+        return jax.random.uniform(k, (m, 2), minval=env.world_min, maxval=env.world_max)
+
+    def body(_, carry):
+        key, ped = carry
+        d = jnp.linalg.norm(ped[:, None, :] - car_pos[None, :, :], axis=-1)
+        conflict = jnp.any(d < sep, axis=1)
+        key, ks = jax.random.split(key)
+        ped = jnp.where(conflict[:, None], sample(ks), ped)
+        return key, ped
+
+    key, k0 = jax.random.split(key)
+    _, ped = jax.lax.fori_loop(0, env.spawn_tries, body, (key, sample(k0)))
+    return ped
+
+
+def reset(env: Env, key: jax.Array):
+    kc, kp, kpd = jax.random.split(key, 3)
+    n = env.n_agents
+    route_idx, pos, heading, wp = _place_cars(env, kc)
+    ped_pos = _place_peds(env, kpd, pos)
     st = State(
         pos=pos, heading=heading, speed=jnp.zeros(n),
         route_idx=route_idx, wp_ptr=wp, lane=jnp.zeros(n, jnp.int32),
@@ -233,9 +290,8 @@ def reset(env: Env, key: jax.Array):
         # finite cohort; see docs/HANDOFF-sim-contract.md §0.
         spawn_grace=jnp.full(n, SPAWN_GRACE, jnp.int32),
         arrived=jnp.zeros(n, bool), goals=jnp.zeros(n, jnp.int32),
-        ped_pos=jax.random.uniform(kp, (env.n_peds, 2),
-                                   minval=env.world_min, maxval=env.world_max),
-        ped_dir=jax.random.uniform(kpd, (env.n_peds,), minval=-jnp.pi, maxval=jnp.pi),
+        ped_pos=ped_pos,
+        ped_dir=jax.random.uniform(kp, (env.n_peds,), minval=-jnp.pi, maxval=jnp.pi),
         t=jnp.array(0, jnp.int32),
     )
     return st, _observe(env, st, _candidates(env, st.pos))
