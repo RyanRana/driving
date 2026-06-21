@@ -146,3 +146,57 @@ def test_cross_lo_hi_are_cum_columns(simple_net):
     p = build_ped_paths(xy, n, lanes, junc, lane_width=3.5, n_peds=6, seed=3)
     np.testing.assert_array_equal(p.cross_lo, p.cum[:, 1])
     np.testing.assert_array_equal(p.cross_hi, p.cum[:, 2])
+
+
+@pytest.fixture
+def endpoint_only_junction_net():
+    """Route with junction TRUE ONLY at endpoints (j=0 and j=last), interior False."""
+    routes_xy = np.array([[[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]]], np.float32)
+    routes_n = np.array([3], np.int32)
+    routes_lanes = np.array([[2, 2, 2]], np.int32)
+    # Junctions only at endpoints — j=0 and j=2 — interior (j=1) is False.
+    routes_junc = np.array([[True, False, True]], bool)
+    return routes_xy, routes_n, routes_lanes, routes_junc
+
+
+def test_endpoint_junction_falls_back_to_midblock(endpoint_only_junction_net):
+    """Junctions at j=0 and j=last only — no interior junctions — must fall back to mid-block.
+
+    The fix in _junction_waypoints (has_prev AND has_next) means endpoint-only
+    junctions are excluded.  build_ped_paths must still produce valid polylines
+    via the mid-block fallback path.
+    """
+    xy, n, lanes, junc = endpoint_only_junction_net
+    p = build_ped_paths(xy, n, lanes, junc, lane_width=3.5, n_peds=10, seed=55)
+    # Shape contract
+    assert p.paths.shape == (10, 4, 2)
+    assert p.cum.shape == (10, 4)
+    assert p.starts.shape == (10,)
+    assert p.cross_lo.shape == (10,) and p.cross_hi.shape == (10,)
+    # crossing interval is a real, positive-length interval
+    assert np.all(p.cross_hi > p.cross_lo), "cross_hi must exceed cross_lo (real crossing)"
+    # arc lengths are non-decreasing and start at 0
+    assert np.all(p.cum[:, 0] == 0.0)
+    assert np.all(np.diff(p.cum, axis=1) >= -1e-4)
+    # The crossing should NOT be anchored at an endpoint (x=0 or x=100):
+    # mid-block crossings sit somewhere in (0, 100) along x for this straight route.
+    crossing_mid_x = (p.paths[:, 1, 0] + p.paths[:, 2, 0]) / 2.0
+    # route is from x=0 to x=100; endpoints are exactly 0 or 100.
+    assert np.all(crossing_mid_x > 0.0), "Crossing must not be at route start (x=0)"
+    assert np.all(crossing_mid_x < 100.0), "Crossing must not be at route end (x=100)"
+
+
+def test_misshapen_routes_junc_raises():
+    """A routes_junc with wrong shape (e.g. transposed) must raise ValueError immediately."""
+    routes_xy = np.array([[[0.0, 0.0], [50.0, 0.0], [100.0, 0.0]]], np.float32)
+    routes_n = np.array([3], np.int32)
+    routes_lanes = np.array([[2, 2, 2]], np.int32)
+
+    # Correct shape would be (1, 3); pass a transposed (3, 1) instead.
+    routes_junc_wrong = np.array([[False], [True], [False]], bool)  # shape (3, 1)
+
+    with pytest.raises(ValueError, match="routes_junc shape"):
+        build_ped_paths(
+            routes_xy, routes_n, routes_lanes, routes_junc_wrong,
+            lane_width=3.5, n_peds=4, seed=0,
+        )

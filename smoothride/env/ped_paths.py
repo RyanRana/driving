@@ -31,14 +31,20 @@ class PedPaths:
 
 
 def _junction_waypoints(routes_junc: np.ndarray, r: int, nwp: int) -> list[int]:
-    """Return interior waypoint indices that are junctions and have a valid segment."""
+    """Return interior waypoint indices that are junctions with road on both sides.
+
+    Only waypoints that have both a predecessor and a successor segment qualify
+    as crossing anchors.  Endpoint waypoints (j=0, j=last) are excluded because
+    they lack one of the two flanking road segments and cannot form a valid
+    crossing geometry.
+    """
     result = []
     for j in range(nwp):
         if not routes_junc[r, j]:
             continue
         has_prev = j > 0
         has_next = j < nwp - 1
-        if has_prev or has_next:
+        if has_prev and has_next:
             result.append(j)
     return result
 
@@ -162,6 +168,12 @@ def build_ped_paths(
         PedPaths dataclass (immutable).
     """
     rng = np.random.default_rng(seed)
+    if routes_junc.shape != routes_xy.shape[:2]:
+        raise ValueError(
+            f"routes_junc shape {routes_junc.shape} must match routes_xy.shape[:2] "
+            f"{routes_xy.shape[:2]}; received a transposed or wrong array."
+        )
+    routes_junc = np.asarray(routes_junc, dtype=bool)
     R = routes_xy.shape[0]
     paths = np.zeros((n_peds, N_PED_POINTS, 2), np.float32)
     for m in range(n_peds):
