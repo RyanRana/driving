@@ -39,6 +39,19 @@
 - round2 @300 cars: car_car_rate ~0.0019/step (~0.47 cumulative), car_ped~0 => CAR-CAR wall at 300 cars.
 - FRONTIER HYPOTHESIS: near-zero needs cars<=~100 AND peds<=~20. round3 tests this corner.
 
+
+## *** FRONTIER FOUND (round 3) *** crash/car (downtown, cruise4/wped8):
+  60c/10p -> 0.021 (final) | 96c/10p -> 0.018 (it100, falling) | 96c/20p -> 0.033 | 150c/20p -> 0.16 (car-car emerging)
+  => SAFE CORNER ~ <=96 cars + ~10 peds gives ~2% crash (car-car=0, residual car-ped), trending to ~1%. Target 0.5% is close.
+  => 300+ cars NOT achievable near-zero (car-car saturates). Honest frontier: ~80-100 cars max for low crash in this bbox.
+## ROUND 4 (push to target + LOO model):
+  _v4c96p10x ap-scYK8ObAZ9iV9KqoY3sVDy (96/10, 300it floor)
+  _v4c96p5   ap-KlJUaByKKSl0ClfBlG6MZA (96/5, 200it)
+  _v4c60p5   ap-VF7rFY4TXXQ6qyRhClEQfC (60/5, 200it)
+  _v4loo     ap-nUwSf6DzQeBdONlaKSbDIV (96/10, 300it, --regions downtown,nopa,chinatown_fidi = LOO, eval HELD-OUT mission)
+  pull numbers: for tg in ...; do modal volume get smoothride-nav-ckpts history$tg.json /tmp/h$tg.json --force; python3 -c "import json,sys;m=json.load(open('/tmp/h'+sys.argv[1]+'.json'))[-1];print(sys.argv[1],m['iter'],round(m['crashes_per_car'],3))" $tg; done
+## NEXT after round4: eval _v4loo on held-out mission (export_cesium/eval); pick best safe config; render a clean demo scene; final summary in this file.
+
 ## Experiment results (append every run)
 | tag | region(s) train | eval region | arch | cars | peds | iters | crash/car | car-ped | car-car | arrived% | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
