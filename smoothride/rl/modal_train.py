@@ -97,7 +97,7 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
           tag: str = "", n_peds: int = 300, cruise_cap: float = 7.0,
           ped_radius: float = 3.5, cand_cap: int = 16,
           snapshot_every: int = 50, soft_target: float = 0.05,
-          w_carped: float = 3.0) -> dict:
+          w_carped: float = 3.0, arch: str = "deepsets") -> dict:
     """Train the shared-weight nav policy; write {untrained,trained}{tag}.msgpack
     to the volume. Returns the final-iteration metrics dict.
 
@@ -113,6 +113,11 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
     Set ``snapshot_every=0`` to disable mid-run snapshots (only final written).
     All existing periodic saves (every-10-iter ``trained{tag}.msgpack``) are
     preserved — versioned snapshots are purely additive.
+
+    Set encoder selection (v2 Task 6):
+      * ``arch="deepsets"`` (default) — masked mean+max pool (DeepSets).
+      * ``arch="attention"`` — ego-query masked attention (AttentionPool).
+        Example: ``modal run -m smoothride.rl.modal_train --arch attention``.
     """
     import json
     import os
@@ -144,7 +149,7 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64,
                      max_steps=steps, v_max=vmax, cruise_cap=cruise_cap,
                      ped_radius=ped_radius, cand_cap_car=cand_cap,
                      cand_cap_ped=cand_cap, seed=seed, **extra)
-    cfg = ppo.PPOConfig(n_worlds=worlds)
+    cfg = ppo.PPOConfig(n_worlds=worlds, encoder=arch)
     print(f"device={jax.devices()} env: agents={env.n_agents} obs={env.obs_dim} "
           f"steps={env.max_steps} worlds={cfg.n_worlds}", flush=True)
     print(f"dual-Lagrangian: crash_target={crash_target} soft_target={effective_soft_target} "
@@ -256,13 +261,18 @@ def main(iters: int = 300, worlds: int = 64, agents: int = 64,
          wait: bool = False, n_peds: int = 300, cruise_cap: float = 7.0,
          ped_radius: float = 3.5, cand_cap: int = 16, seed: int = 0,
          snapshot_every: int = 50, crash_target: float = 0.0,
-         soft_target: float = 0.05, w_carped: float = 3.0):
+         soft_target: float = 0.05, w_carped: float = 3.0,
+         arch: str = "deepsets"):
     """Local entrypoint: spawns (or waits on) the remote training function.
 
     New flags (v2 Task 3 — dual-Lagrangian):
       --crash-target  Hard collision target (default 0.0; drive to zero crashes).
       --soft-target   Graded hinge target (default 0.05; mirrors old --cost-target).
       --w-carped      Car-ped weight in hard_cost (default 3.0; car-ped > car-car).
+
+    New flag (v2 Task 6 — selectable encoder):
+      --arch          Set encoder: "deepsets" (default) or "attention".
+                      Example: modal run -m smoothride.rl.modal_train --arch attention
 
     Legacy flag (still accepted):
       --cost-target   Maps to --soft-target for backward compat.
@@ -272,7 +282,7 @@ def main(iters: int = 300, worlds: int = 64, agents: int = 64,
               region=region, tag=tag, n_peds=n_peds, cruise_cap=cruise_cap,
               ped_radius=ped_radius, cand_cap=cand_cap, seed=seed,
               snapshot_every=snapshot_every, crash_target=crash_target,
-              soft_target=soft_target, w_carped=w_carped)
+              soft_target=soft_target, w_carped=w_carped, arch=arch)
     if wait:                       # blocking: streams live, dies if the client drops
         print("final metrics:", train.remote(**kw))
         return

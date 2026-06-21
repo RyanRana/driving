@@ -31,6 +31,7 @@ class PPOConfig:
     vf_coef: float = 0.5
     lr: float = 3e-4
     max_grad_norm: float = 0.5
+    encoder: str = "deepsets"  # "deepsets" or "attention" (v2 Task 6)
 
 
 def _global_feat(obs):
@@ -43,7 +44,12 @@ def _global_feat(obs):
 
 
 def make_train_state(env: K.Env, cfg: PPOConfig, key) -> TrainState:
-    net = ActorCritic(act_dim=env.act_dim)
+    """Initialise a TrainState for the ActorCritic network.
+
+    Uses ``cfg.encoder`` to select the set encoder: ``"deepsets"`` (default)
+    or ``"attention"`` (ego-query AttentionPool, v2 Task 6).
+    """
+    net = ActorCritic(act_dim=env.act_dim, encoder=cfg.encoder)
     # build a dummy STRUCTURED obs from reset (guarantees correct dict shapes).
     _, dummy = K.reset(env, key)
     params = net.init(key, dummy, _global_feat(dummy))
