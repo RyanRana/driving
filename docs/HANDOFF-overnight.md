@@ -30,6 +30,15 @@
 - v2-T5 multi-region round-robin (--regions) — ✅ DONE (8825398, 174 tests)
 - v2-T6 attention encoder (--arch attention) — ✅ DONE (5adc7bf, 166 tests)
 
+
+## ROUND 3 (relaunched cleanly) — frontier sweep, downtown cruise4/wped8 worlds16 150it:
+  _v3c60p10 ap-HhiUzpgjiMmMJhI8GkmQn6 | _v3c96p20 ap-V5QgMKInL9BPNUjok0jWUs | _v3c96p10 ap-SHo9ajkCQrJoH325R9O12K | _v3c150p20 ap-reMfoFDIvWedmurN5qMnYA
+## Confirmed numbers so far:
+- _v2slow FINAL it199: crash/car 0.199 (96cars/300peds, fully trained, slow+wped8) — still 40x target => 300 peds too dense.
+- _v2att FINAL: 0.485 (attention NOT better than deepsets ~0.44). Drop attention.
+- round2 @300 cars: car_car_rate ~0.0019/step (~0.47 cumulative), car_ped~0 => CAR-CAR wall at 300 cars.
+- FRONTIER HYPOTHESIS: near-zero needs cars<=~100 AND peds<=~20. round3 tests this corner.
+
 ## Experiment results (append every run)
 | tag | region(s) train | eval region | arch | cars | peds | iters | crash/car | car-ped | car-car | arrived% | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
