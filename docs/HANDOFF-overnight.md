@@ -135,3 +135,6 @@
 - **BEST SO FAR:** _v4loo (multi-region) => 1% crash on HELD-OUT mission (generalizes). In-distribution: ~0.9% @96/5. Round5 pushing to <=0.5% + longer LOO (_v5loolong). NEXT: when round5 done, pull numbers, eval _v5loolong on held-out mission, render a demo scene, write FINAL SUMMARY here.
 
 ## FINAL RUN (may finish ~by 9am): _v6loolow ap-lquNa9APnESZGxwwsXGagw = 96cars/4peds 3-region LOO 800it (aim held-out <=1%). Eval cmd: modal volume get smoothride-nav-ckpts trained_v6loolow.msgpack runs/ ; cp runs/trained_v6loolow.msgpack runs/untrained_v6loolow.msgpack ; python3 scripts/eval_policy.py --region mission --agents 96 --peds 4 --steps 250 --trained runs/trained_v6loolow.msgpack --untrained runs/untrained_v6loolow.msgpack
+
+## _v6loolow RESULT: held-out Mission 2/96 (2%) crash, 70% arrivals, off-lane 24%/step (WORSE lane discipline). Did NOT beat v4loo (1/96). => Held-out crash floor ~1-2% with this method; v4loo is the generalization CHAMPION. In-distribution champion remains _v5c96p5x (0.07%).
+## NIGHT CONCLUDED. Champions: in-dist trained_v5c96p5x (0.07%); held-out trained_v4loo (1%). All committed+pushed.
