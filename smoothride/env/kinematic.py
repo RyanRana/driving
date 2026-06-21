@@ -8,8 +8,11 @@ Models the actual environment:
   * MULTI-LANE roads + lane-change action
   * lead-vehicle GAP -> car-following + stop-and-go
   * INTERSECTION yielding (right-of-way without traffic lights)
-  * unruly PEDESTRIANS to avoid (severe penalty)
-  * continuous respawn -> persistent traffic (throughput = headline metric)
+  * unruly PEDESTRIANS to avoid (scored as a constraint, not reward)
+  * FINITE COHORT: each car runs one trip then freezes (arrive/crash), no respawn
+  * NON-OVERLAPPING spawns: cars/peds never start within a collision (root-cause)
+  * CMDP reward (§9): efficiency only (progress + arrival − time); crash/lane/
+    proximity constraints flow through the deterministic verifier's cost channel
   * SPATIAL-HASH neighbor search -> O(N*C), scales to thousands of cars
 
 Pure `reset`/`step` over one world of N cars + M peds; `vmap` over worlds.
@@ -71,6 +74,11 @@ class Env:
     w_ped: float = struct.field(pytree_node=False, default=80.0)
     w_yield: float = struct.field(pytree_node=False, default=1.5)
     w_goal: float = struct.field(pytree_node=False, default=15.0)
+    # CMDP reframe (§9): reward is efficiency only (progress + arrival − time); all
+    # crash/lane/proximity constraints leave the reward and go through the verifier's
+    # cost channel. w_idle/w_prox/w_collision/w_ped*/w_yield are retained for config
+    # compatibility but no longer shape the reward.
+    w_time: float = struct.field(pytree_node=False, default=0.02)
 
     @property
     def obs_dim(self) -> int:
@@ -345,27 +353,18 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
     cd = jnp.where(neighbor_ok, jnp.linalg.norm(rel, axis=-1), 1e9)
     min_d = cd.min(1)
     car_crash = (min_d < env.collision_radius) & ~immune
-    prox_pen = jnp.clip((env.prox_radius - min_d) / env.prox_radius, 0, 1)
 
     # pedestrians (severe)
     pd = jnp.linalg.norm(pos[:, None, :] - st.ped_pos[None, :, :], axis=-1)
     ped_min = pd.min(axis=-1)
     ped_hit = (ped_min < env.ped_radius) & ~immune
-    ped_prox = jnp.clip((env.prox_radius - ped_min) / env.prox_radius, 0, 1)
     crash_event = car_crash | ped_hit
 
-    # intersection yielding over candidates (same junction node, closer car first)
-    cur_node = env.routes_node[st.route_idx, st.wp_ptr]
-    is_junc = env.routes_junc[st.route_idx, st.wp_ptr]
-    near_junc = is_junc & (dist < env.junc_zone)
-    same = valid & (cur_node[cand] == cur_node[:, None]) & (cur_node[:, None] >= 0)
-    has_priority = same & near_junc[:, None] & near_junc[cand] & (dist[cand] < dist[:, None])
-    should_yield = near_junc & jnp.any(has_priority, axis=1)
-    yield_pen = (should_yield & (speed > env.idle_speed)).astype(jnp.float32)
-
-    # NO respawn. A car becomes done the step it arrives or crashes; from then on it
-    # is frozen at that spot. `done` (above) was the state at the START of this step;
-    # cars finishing THIS step keep the position where they finished, then stop.
+    # NO respawn (finite cohort, ours). A car becomes done the step it arrives or
+    # crashes; from then on it is frozen at that spot. `done` (above) was the state at
+    # the START of this step; cars finishing THIS step keep the position where they
+    # finished, then stop. Intersection-yield / proximity penalties are gone from the
+    # reward (CMDP §9) — the verifier scores those constraints from the trace.
     arrived = st.arrived | new_goal
     crashes = st.crashes + crash_event.astype(jnp.int32)
     goals = st.goals + new_goal.astype(jnp.int32)
@@ -380,16 +379,12 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
     spawn_grace = jnp.maximum(st.spawn_grace - 1, 0)
     ped_pos, ped_dir = _ped_step(env, st, kped)
 
-    idle_pen = (speed < env.idle_speed)
-    reward = (
-        env.w_progress * progress
-        - env.w_idle * idle_pen.astype(jnp.float32)
-        - env.w_prox * prox_pen - env.w_ped_prox * ped_prox
-        - env.w_yield * yield_pen
-        - env.w_collision * car_crash.astype(jnp.float32)
-        - env.w_ped * ped_hit.astype(jnp.float32)
-        + env.w_goal * new_goal.astype(jnp.float32)
-    )
+    # CMDP reward (§9): efficiency only — progress along route, arrival bonus, and a
+    # small per-step time cost. Crash/lane/proximity constraints are scored by the
+    # verifier's cost channel (rl/verifier.cost_signal), never folded in here.
+    reward = (env.w_progress * progress
+              + env.w_goal * new_goal.astype(jnp.float32)
+              - env.w_time)
     # a car already finished at the start of the step earns nothing further.
     reward = jnp.where(done, 0.0, reward)
 

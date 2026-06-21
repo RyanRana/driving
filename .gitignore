@@ -19,7 +19,6 @@ smoothride/demo/cesium/public/
 # generated cache & build metadata
 cache/
 *.egg-info/
-
 # local browser-testing artifacts (Cesium viewer smoke screenshots)
 .playwright-mcp/
 smoothride-*.png
@@ -28,3 +27,7 @@ smoothride-*.png
 proof-*.png
 arrival-*.png
 main-cesium-*.png
+
+# test/coverage caches
+.coverage
+.pytest_cache/
