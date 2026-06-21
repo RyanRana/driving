@@ -186,7 +186,7 @@ def main() -> None:
         print(f"\nRendering iter {it} from {ckpt_path}...", flush=True)
         params = load_params(env, ckpt_path)
         tr = rollout(env, params, jax.random.PRNGKey(args.seed), sample=True)
-        rollouts = {f"iter_{it:05d}": tr}
+        rollouts = {"trained": tr}  # one world per snapshot file; iter is in the filename
         worlds = build_from_rollouts(net, env, tf, rollouts, args.stride)
 
         scene = S.build_scene(meta=meta, roads=roads_3d_data, buildings=buildings,

@@ -109,7 +109,12 @@ async function loadScene(path) {
 
   const scene = await (await fetch(path, { cache: "no-store" })).json();
   if (scene.schema_version !== 1) throw new Error("unsupported schema " + scene.schema_version);
-  const meta = scene.meta, world = scene.worlds[WORLD];
+  // Prefer the conventional "trained" world; otherwise fall back to the first
+  // world in the scene (snapshot scenes carry a single world per file), so the
+  // viewer never depends on a specific world key.
+  const meta = scene.meta;
+  const world = scene.worlds[WORLD] || scene.worlds[Object.keys(scene.worlds)[0]];
+  if (!world) throw new Error("scene has no worlds to render");
 
   // Per-scene GeoJSON buildings: used when (a) no ion token, or (b) token present
   // but OSM Buildings failed at startup (_geoJsonBuildingsFallback === true).
