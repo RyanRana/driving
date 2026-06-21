@@ -171,8 +171,14 @@ def test_collect_logs_peds_and_verifier_cost_runs() -> None:
 
     import jax.numpy as jnp  # noqa: PLC0415
 
-    cost = ppo.verifier_cost(env, batch)
-    assert cost.shape == (2, env.max_steps, env.n_agents), (
-        f"Expected cost shape (2, {env.max_steps}, {env.n_agents}), got {cost.shape}"
+    # v2 Task 3: verifier_cost now returns (cost_hard, cost_soft) tuple.
+    cost_hard, cost_soft = ppo.verifier_cost(env, batch)
+    expected_shape = (2, env.max_steps, env.n_agents)
+    assert cost_hard.shape == expected_shape, (
+        f"Expected cost_hard shape {expected_shape}, got {cost_hard.shape}"
     )
-    assert float(jnp.asarray(cost).max()) >= 0.0, "cost must be non-negative"
+    assert cost_soft.shape == expected_shape, (
+        f"Expected cost_soft shape {expected_shape}, got {cost_soft.shape}"
+    )
+    assert float(jnp.asarray(cost_hard).min()) >= 0.0, "cost_hard must be non-negative"
+    assert float(jnp.asarray(cost_soft).min()) >= 0.0, "cost_soft must be non-negative"

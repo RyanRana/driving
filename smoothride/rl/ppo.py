@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from flax.training.train_state import TrainState
 
@@ -79,6 +80,10 @@ def collect(env: K.Env, ts: TrainState, key, n_worlds: int):
                        route_idx=st.route_idx, wp_ptr=st.wp_ptr,
                        spawn_grace=st.spawn_grace,
                        crashed=info["just_crashed"],
+                       # collision sub-components (v2 Task 3): car-car and car-ped flags
+                       # let verifier_cost build hard/soft channels separately.
+                       car_crash=info["car_crash"].astype(jnp.float32),
+                       ped_hit=info["ped_hit"].astype(jnp.float32),
                        # pedestrian state — per-world (M,2)/(M,), NOT per-agent:
                        # after vmap+scan these become (B,T,M,2)/(B,T,M).
                        ped_pos=st.ped_pos, ped_crossing=st.ped_crossing)
@@ -97,18 +102,35 @@ def collect(env: K.Env, ts: TrainState, key, n_worlds: int):
     return batch
 
 
-def verifier_cost(env: K.Env, batch) -> jnp.ndarray:
+def verifier_cost(
+    env: K.Env,
+    batch,
+    w_carped: float = 3.0,
+) -> tuple[np.ndarray, np.ndarray]:
     """Relabel a collected rollout with the verifier's per-step cost (handoff §8).
 
     The rollout runs on device; here (on host) we gather the road geometry for each
     logged (route_idx, wp_ptr) and run the same rule predicates the offline verifier
-    grades with — so the signal the policy is trained against IS the verifier's. This
-    is the reward-model pattern: score completed rollouts, feed the score to PPO.
-    Returns (B, T, N) to drop straight into `batch["cost"]`.
+    grades with — so the signal the policy is trained against IS the verifier's.
+
+    Returns a tuple ``(cost_hard, cost_soft)`` each of shape ``(B, T, N)``:
+      * ``cost_hard``: binary collision term — ``hard_cost(components, w_carcar=1.0,
+        w_carped=w_carped)``. The Lagrangian must drive this to zero.
+      * ``cost_soft``: graded lane + proximity hinges — ``soft_cost(components)``.
+        The Lagrangian keeps this at or below the soft target.
+
+    Args:
+        env: The kinematic :class:`~smoothride.env.kinematic.Env` (owns geometry).
+        batch: Collected rollout dict with keys pos, heading, speed, etc.
+        w_carped: Weight on the car-ped binary term in ``hard_cost`` (default 3.0 —
+            car-ped is weighted 3× higher than car-car to drive it to 0 first).
+
+    Returns:
+        ``(cost_hard, cost_soft)`` — both ``np.ndarray`` of shape ``(B, T, N)``.
     """
     import numpy as np
 
-    from .verifier import step_cost
+    from .verifier import hard_cost, soft_cost, step_cost_components
 
     rxy = np.asarray(env.routes_xy)              # (R, W, 2)
     rlanes = np.asarray(env.routes_lanes)        # (R, W)
@@ -116,7 +138,7 @@ def verifier_cost(env: K.Env, batch) -> jnp.ndarray:
     ri = np.asarray(batch["route_idx"])          # (B, T, N)
     wp = np.asarray(batch["wp_ptr"])
     B, T, N = ri.shape
-    seg_start = rxy[ri, np.maximum(wp - 1, 0)]   # (B, T, N, 2)
+    seg_start = rxy[ri, np.maximum(wp - 1, 0)]  # (B, T, N, 2)
     seg_end = rxy[ri, wp]
     lane_count = rlanes[ri, wp]
     speed_limit = rspeed[ri, wp]
@@ -125,17 +147,35 @@ def verifier_cost(env: K.Env, batch) -> jnp.ndarray:
         return x.reshape((B * T,) + x.shape[2:])
 
     # Ped arrays are per-world (shared across agents): reshape (B,T,M,...) -> (B*T,M,...).
-    pp = r2(np.asarray(batch["ped_pos"]))      # (B*T, M, 2)
-    pc = r2(np.asarray(batch["ped_crossing"])) # (B*T, M)
-    cost = step_cost(
-        r2(np.asarray(batch["pos"])), r2(seg_start), r2(seg_end), r2(lane_count),
-        float(env.lane_width), r2(np.asarray(batch["heading"])),
-        r2(np.asarray(batch["speed"])), r2(np.asarray(batch["spawn_grace"])),
-        r2(np.asarray(batch["crashed"])), r2(speed_limit),
+    pp = r2(np.asarray(batch["ped_pos"]))       # (B*T, M, 2)
+    pc = r2(np.asarray(batch["ped_crossing"]))  # (B*T, M)
+
+    # Use collision sub-components recorded during collect (car_crash, ped_hit)
+    # so the hard/soft split mirrors the exact events from the env.
+    car_crashed_bt = r2(np.asarray(batch["car_crash"]))  # (B*T, N)
+    ped_hit_bt = r2(np.asarray(batch["ped_hit"]))        # (B*T, N)
+
+    components = step_cost_components(
+        r2(np.asarray(batch["pos"])),
+        r2(seg_start), r2(seg_end), r2(lane_count),
+        float(env.lane_width),
+        r2(np.asarray(batch["heading"])),
+        r2(np.asarray(batch["speed"])),
+        r2(np.asarray(batch["spawn_grace"])),
+        car_crashed_bt, ped_hit_bt,
+        r2(speed_limit),
         ped_pos=pp, ped_crossing=pc,
-        r_ped=float(env.ped_radius), r_yield=float(env.r_yield),
-        cruise_cap=float(env.cruise_cap))
-    return jnp.asarray(cost.reshape(B, T, N))
+        r_ped=float(env.ped_radius),
+        r_yield=float(env.r_yield),
+        cruise_cap=float(env.cruise_cap),
+        r_risk=7.0,
+        collision_radius=float(env.collision_radius),
+    )
+
+    cost_hard = hard_cost(components, w_carcar=1.0, w_carped=w_carped)
+    cost_soft = soft_cost(components)
+
+    return cost_hard.reshape(B, T, N), cost_soft.reshape(B, T, N)
 
 
 def compute_gae(reward, value, last_value, gamma, lam):
@@ -155,7 +195,35 @@ def compute_gae(reward, value, last_value, gamma, lam):
 
 
 @functools.partial(jax.jit, static_argnums=(1,))
-def update(env: K.Env, cfg: PPOConfig, ts: TrainState, batch, lam=0.0):
+def update(
+    env: K.Env,
+    cfg: PPOConfig,
+    ts: TrainState,
+    batch,
+    lam_hard: float = 0.0,
+    lam_soft: float = 0.0,
+    lam: float = 0.0,
+):
+    """PPO parameter update with dual-Lagrangian cost penalisation.
+
+    Args:
+        env: Kinematic environment (static; provides geometry for shapes only).
+        cfg: PPO hyper-parameters (frozen dataclass; JIT-static).
+        ts: Current :class:`flax.training.train_state.TrainState`.
+        batch: Rollout dict produced by :func:`collect`.  Must contain
+            ``cost_hard`` and ``cost_soft`` arrays of shape ``(B, T, N)``
+            (set by the caller after :func:`verifier_cost`).
+        lam_hard: Lagrange multiplier for the *hard* (binary collision) cost
+            channel.  Updated externally by dual ascent toward crash_target.
+        lam_soft: Lagrange multiplier for the *soft* (graded hinge) cost
+            channel.  Updated externally by dual ascent toward soft_target.
+        lam: Deprecated single-channel multiplier kept for backward compat.
+            When ``cost_hard``/``cost_soft`` are absent, falls back to
+            ``batch["cost"]`` weighted by ``lam``.
+
+    Returns:
+        ``(ts_new, metrics)`` where metrics is a dict of finite scalars.
+    """
     # GAE per (world, agent): vmap over worlds, then over agents.
     def world_gae(reward, value, last_value):
         # reward/value: (T, N) ; last_value: (N,)
@@ -164,9 +232,16 @@ def update(env: K.Env, cfg: PPOConfig, ts: TrainState, batch, lam=0.0):
             in_axes=(1, 1, 0), out_axes=1)(reward, value, last_value)
         return adv, ret
 
-    # PPO-Lagrangian: subtract an adaptive multiplier * per-step crash cost. lam
-    # is updated by dual ascent in the train loop toward a crash-rate target.
-    reward_eff = batch["reward"] - lam * batch["cost"]
+    # Dual-channel PPO-Lagrangian: penalise hard (binary collisions) and soft
+    # (graded hinges + lane) separately. Falls back to legacy single-lam if the
+    # dual channels aren't in the batch (backward compat).
+    if "cost_hard" in batch and "cost_soft" in batch:
+        reward_eff = (batch["reward"]
+                      - lam_hard * batch["cost_hard"]
+                      - lam_soft * batch["cost_soft"])
+    else:
+        # Legacy path: single cost channel (old callers pass lam=X).
+        reward_eff = batch["reward"] - lam * batch["cost"]
     adv, ret = jax.vmap(world_gae)(reward_eff, batch["value"],
                                    batch["last_value"])  # (B, T, N)
 
