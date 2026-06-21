@@ -33,6 +33,39 @@ class ActorCritic(nn.Module):
         return mean, log_std, value
 
 
+class DeepSets(nn.Module):
+    """Permutation-invariant set encoder: per-element MLP phi, then masked
+    mean+max pool. Empty set -> zeros. Density-agnostic, handles padded slots."""
+
+    feat_dim: int
+    hidden: int = 64
+
+    @nn.compact
+    def __call__(self, entities: jnp.ndarray, mask: jnp.ndarray) -> jnp.ndarray:
+        """Encode a set of entities with validity mask.
+
+        Args:
+            entities: (..., C, feat_dim) — one row per slot.
+            mask: (..., C) bool — True for valid slots, False for padding.
+
+        Returns:
+            (..., 2*hidden) — concat of masked mean-pool and max-pool.
+        """
+        h = nn.relu(nn.Dense(self.hidden)(entities))
+        h = nn.relu(nn.Dense(self.hidden)(h))          # (..., C, hidden)
+        m = mask[..., None].astype(h.dtype)            # (..., C, 1) float
+        h = h * m                                      # zero invalid slots
+        summed = jnp.sum(h, axis=-2)                   # (..., hidden)
+        count = jnp.clip(jnp.sum(m, axis=-2), 1.0)    # live count >= 1
+        mean = summed / count
+        # masked max: push invalid slots to large-negative so they never win
+        neg = jnp.where(m > 0, h, -1e9)
+        mx = jnp.max(neg, axis=-2)                     # (..., hidden)
+        any_valid = jnp.sum(m, axis=-2) > 0            # (..., 1) bool
+        mx = jnp.where(any_valid, mx, 0.0)             # guard empty set
+        return jnp.concatenate([mean, mx], axis=-1)    # (..., 2*hidden)
+
+
 def gaussian_logp(actions, mean, log_std):
     std = jnp.exp(log_std)
     pre = -0.5 * (((actions - mean) / std) ** 2) - log_std - 0.5 * jnp.log(2 * jnp.pi)
