@@ -67,6 +67,8 @@ def policy_trace(env: K.Env, params, key, n_steps: int, sample: bool = False) ->
             crashed=np.asarray(info["just_crashed"], bool),
             arrived=np.asarray(info["arrived"], bool),
             speed_limit=rspeed[ri, wp].astype(np.float32),
+            ped_pos=np.asarray(st.ped_pos, np.float32),
+            ped_crossing=np.asarray(st.ped_crossing, bool),
         ))
         st, obs = nst, nobs
 
@@ -83,7 +85,8 @@ def policy_trace(env: K.Env, params, key, n_steps: int, sample: bool = False) ->
         seg_start=stack("seg_start"), seg_end=stack("seg_end"),
         lane_count=stack("lane_count"), spawn_grace=stack("spawn_grace"),
         crashed=stack("crashed"), arrived=stack("arrived"), speed_limit=stack("speed_limit"),
-        collision_radius=float(env.collision_radius), lane_width=float(env.lane_width))
+        collision_radius=float(env.collision_radius), lane_width=float(env.lane_width),
+        ped_pos=stack("ped_pos"), ped_crossing=stack("ped_crossing"))
 
 
 def report(name: str, v, n: int, trace: Trace) -> None:

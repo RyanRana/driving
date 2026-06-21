@@ -54,6 +54,8 @@ def rollout_to_trace(env: K.Env, key, n_steps: int) -> Trace:
             crashed=np.asarray(info["just_crashed"], bool),
             arrived=(new_goals > prev_goals),          # synthesized (no latch here)
             speed_limit=routes_speed[ri, wp].astype(np.float32),
+            ped_pos=np.asarray(st.ped_pos, np.float32),
+            ped_crossing=np.asarray(st.ped_crossing, bool),
         ))
         prev_goals = new_goals
         st = nst
@@ -78,6 +80,7 @@ def rollout_to_trace(env: K.Env, key, n_steps: int) -> Trace:
         crashed=stack("crashed"), arrived=stack("arrived"),
         speed_limit=stack("speed_limit"),
         collision_radius=float(env.collision_radius), lane_width=float(env.lane_width),
+        ped_pos=stack("ped_pos"), ped_crossing=stack("ped_crossing"),
     )
 
 

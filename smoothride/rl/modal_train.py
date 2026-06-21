@@ -56,7 +56,8 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
           steps: int = 300, vmax: float = 16.0, routes: int = 1024,
           lagrangian: bool = True, crash_target: float = 0.3, seed: int = 0,
           verifier: bool = True, cost_target: float = 0.05, region: str = "downtown",
-          tag: str = "") -> dict:
+          tag: str = "", n_peds: int = 300, cruise_cap: float = 7.0,
+          ped_radius: float = 3.5, cand_cap: int = 16) -> dict:
     """Train the shared-weight nav policy; write {untrained,trained}{tag}.msgpack
     to the volume. Returns the final-iteration metrics dict."""
     import json
@@ -82,8 +83,10 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
     pool = build_route_pool(net, n_routes=routes, seed=seed)
     # Lagrangian: zero the fixed crash penalty so the adaptive multiplier owns it.
     extra = {"w_collision": 0.0} if lagrangian else {}
-    env = K.make_env(pool, (x0, y0), (x1, y1), n_agents=agents, n_peds=peds,
-                     max_steps=steps, v_max=vmax, **extra)
+    env = K.make_env(pool, (x0, y0), (x1, y1), n_agents=agents, n_peds=n_peds,
+                     max_steps=steps, v_max=vmax, cruise_cap=cruise_cap,
+                     ped_radius=ped_radius, cand_cap_car=cand_cap,
+                     cand_cap_ped=cand_cap, seed=seed, **extra)
     cfg = ppo.PPOConfig(n_worlds=worlds)
     print(f"device={jax.devices()} env: agents={env.n_agents} obs={env.obs_dim} "
           f"steps={env.max_steps} worlds={cfg.n_worlds}", flush=True)
@@ -142,10 +145,12 @@ def train(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
 def main(iters: int = 300, worlds: int = 64, agents: int = 64, peds: int = 24,
          steps: int = 300, lagrangian: bool = True, verifier: bool = True,
          cost_target: float = 0.05, region: str = "downtown", tag: str = "",
-         wait: bool = False):
+         wait: bool = False, n_peds: int = 300, cruise_cap: float = 7.0,
+         ped_radius: float = 3.5, cand_cap: int = 16):
     kw = dict(iters=iters, worlds=worlds, agents=agents, peds=peds, steps=steps,
               lagrangian=lagrangian, verifier=verifier, cost_target=cost_target,
-              region=region, tag=tag)
+              region=region, tag=tag, n_peds=n_peds, cruise_cap=cruise_cap,
+              ped_radius=ped_radius, cand_cap=cand_cap)
     if wait:                       # blocking: streams live, dies if the client drops
         print("final metrics:", train.remote(**kw))
         return
