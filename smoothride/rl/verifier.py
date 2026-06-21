@@ -72,6 +72,16 @@ def wrong_way(heading: np.ndarray, seg_start: np.ndarray, seg_end: np.ndarray,
     return (np.cos(herr) < wrongway_cos) & (speed > idle_speed) & (spawn_grace == 0)
 
 
+def _lane_flags(pos, seg_start, seg_end, lane_count, lane_width, heading, speed,
+                spawn_grace):
+    """Shared lane-rule core: (lateral, off_lane, wrong_way) per step. Used by both
+    the per-car verdict and the per-step training cost so they apply one rulebook."""
+    lateral = lateral_offset(pos, seg_start, seg_end, lane_count, lane_width)
+    off_lane = (lateral > OFFLANE_THRESH) & (spawn_grace == 0)
+    ww = wrong_way(heading, seg_start, seg_end, speed, spawn_grace)
+    return lateral, off_lane, ww
+
+
 @dataclass(frozen=True)
 class CarVerdict:
     arrived: bool
@@ -107,12 +117,10 @@ def _arrival(trace: Trace, i: int) -> tuple[bool, float | None]:
 
 def verify(trace: Trace) -> RunVerdict:
     """Reduce a recorded `Trace` to per-car and run-level verdicts (handoff §8)."""
-    lateral = lateral_offset(trace.pos, trace.seg_start, trace.seg_end,
-                             trace.lane_count, trace.lane_width)       # (T,N)
-    ww = wrong_way(trace.heading, trace.seg_start, trace.seg_end,
-                   trace.speed, trace.spawn_grace)                      # (T,N) bool
+    lateral, off_lane_steps, ww = _lane_flags(
+        trace.pos, trace.seg_start, trace.seg_end, trace.lane_count,
+        trace.lane_width, trace.heading, trace.speed, trace.spawn_grace)
     over = trace.speed > trace.speed_limit + SPEED_EPS                  # (T,N) bool
-    off_lane_steps = (lateral > OFFLANE_THRESH) & (trace.spawn_grace == 0)
 
     per_car: list[CarVerdict] = []
     for i in range(trace.n_agents):
@@ -138,3 +146,28 @@ def verify(trace: Trace) -> RunVerdict:
         speed_violation_count=sum(1 for c in per_car if c.over_speed),
         per_car=per_car,
     )
+
+
+def step_cost(pos, seg_start, seg_end, lane_count, lane_width, heading, speed,
+              spawn_grace, crashed, speed_limit=None) -> np.ndarray:
+    """Per-step CMDP cost (handoff §6) — the signal that drives training.
+
+    cost = crash + off_lane + wrong_way (+ over_speed if a limit is given), each a
+    0/1 indicator summed. Operates on any 2-leading-axis batch ((T,N) for one
+    rollout, (B*T,N) for a vmapped batch), so the same rulebook the verifier grades
+    with is what the policy is optimized against (no divergence)."""
+    _, off_lane, ww = _lane_flags(pos, seg_start, seg_end, lane_count, lane_width,
+                                  heading, speed, spawn_grace)
+    cost = (np.asarray(crashed, np.float32) + off_lane.astype(np.float32)
+            + ww.astype(np.float32))
+    if speed_limit is not None:
+        cost = cost + (speed > speed_limit + SPEED_EPS).astype(np.float32)
+    return cost
+
+
+def cost_signal(trace: Trace) -> np.ndarray:
+    """Per-step (T, N) training cost for a logged `Trace` — the verifier's signal to
+    PPO. Same predicates as `verify()`, reduced per step instead of per car."""
+    return step_cost(trace.pos, trace.seg_start, trace.seg_end, trace.lane_count,
+                     trace.lane_width, trace.heading, trace.speed, trace.spawn_grace,
+                     trace.crashed, trace.speed_limit)

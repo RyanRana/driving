@@ -67,7 +67,13 @@ def collect(env: K.Env, ts: TrainState, key, n_worlds: int):
             nst, nobs, reward, done, info = K.step(env, st, action, kn)
             out = dict(obs=obs, gf=gf, action=action, logp=logp,
                        value=value, reward=reward,
-                       cost=info["just_crashed"].astype(jnp.float32))
+                       cost=info["just_crashed"].astype(jnp.float32),
+                       # raw State fields so the verifier can relabel cost off-device
+                       # (rl/verifier.cost_signal). seg geometry is gathered on host.
+                       pos=st.pos, heading=st.heading, speed=st.speed,
+                       route_idx=st.route_idx, wp_ptr=st.wp_ptr,
+                       spawn_grace=st.spawn_grace,
+                       crashed=info["just_crashed"])
             return (nst, nobs), out
 
         ks_steps = jax.random.split(ks, env.max_steps)
@@ -81,6 +87,41 @@ def collect(env: K.Env, ts: TrainState, key, n_worlds: int):
     world_keys = jax.random.split(key, n_worlds)
     batch = jax.vmap(one_world_rollout)(world_keys)  # leaves: (B, T, N, ...)
     return batch
+
+
+def verifier_cost(env: K.Env, batch) -> jnp.ndarray:
+    """Relabel a collected rollout with the verifier's per-step cost (handoff §8).
+
+    The rollout runs on device; here (on host) we gather the road geometry for each
+    logged (route_idx, wp_ptr) and run the same rule predicates the offline verifier
+    grades with — so the signal the policy is trained against IS the verifier's. This
+    is the reward-model pattern: score completed rollouts, feed the score to PPO.
+    Returns (B, T, N) to drop straight into `batch["cost"]`.
+    """
+    import numpy as np
+
+    from .verifier import step_cost
+
+    rxy = np.asarray(env.routes_xy)              # (R, W, 2)
+    rlanes = np.asarray(env.routes_lanes)        # (R, W)
+    rspeed = np.asarray(env.routes_speed)        # (R, W)
+    ri = np.asarray(batch["route_idx"])          # (B, T, N)
+    wp = np.asarray(batch["wp_ptr"])
+    B, T, N = ri.shape
+    seg_start = rxy[ri, np.maximum(wp - 1, 0)]   # (B, T, N, 2)
+    seg_end = rxy[ri, wp]
+    lane_count = rlanes[ri, wp]
+    speed_limit = rspeed[ri, wp]
+
+    def r2(x):                                   # (B,T,...) -> (B*T,...)
+        return x.reshape((B * T,) + x.shape[2:])
+
+    cost = step_cost(
+        r2(np.asarray(batch["pos"])), r2(seg_start), r2(seg_end), r2(lane_count),
+        float(env.lane_width), r2(np.asarray(batch["heading"])),
+        r2(np.asarray(batch["speed"])), r2(np.asarray(batch["spawn_grace"])),
+        r2(np.asarray(batch["crashed"])), r2(speed_limit))
+    return jnp.asarray(cost.reshape(B, T, N))
 
 
 def compute_gae(reward, value, last_value, gamma, lam):

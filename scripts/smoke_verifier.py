@@ -11,7 +11,6 @@ remove-on-arrival latch, so `arrived` is synthesized from `goals` increments.
 from __future__ import annotations
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 from smoothride.data.map_loader import load_road_network

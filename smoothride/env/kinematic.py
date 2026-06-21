@@ -69,6 +69,11 @@ class Env:
     w_ped: float = struct.field(pytree_node=False, default=80.0)
     w_yield: float = struct.field(pytree_node=False, default=1.5)
     w_goal: float = struct.field(pytree_node=False, default=15.0)
+    # CMDP reframe (§9): reward is efficiency only (progress + arrival − time); all
+    # crash/lane/proximity constraints leave the reward and go through the verifier's
+    # cost channel. w_idle/w_prox/w_collision/w_ped*/w_yield are retained for config
+    # compatibility but no longer shape the reward.
+    w_time: float = struct.field(pytree_node=False, default=0.02)
 
     @property
     def obs_dim(self) -> int:
@@ -274,23 +279,12 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
     # teleport-overlap crash. Real cars enter from map edges, not on top of others.
     immune = st.spawn_grace > 0
     car_crash = (min_d < env.collision_radius) & ~immune
-    prox_pen = jnp.clip((env.prox_radius - min_d) / env.prox_radius, 0, 1)
 
     # pedestrians (severe)
     pd = jnp.linalg.norm(pos[:, None, :] - st.ped_pos[None, :, :], axis=-1)
     ped_min = pd.min(axis=-1)
     ped_hit = (ped_min < env.ped_radius) & ~immune
-    ped_prox = jnp.clip((env.prox_radius - ped_min) / env.prox_radius, 0, 1)
     crash_event = car_crash | ped_hit
-
-    # intersection yielding over candidates (same junction node, closer car first)
-    cur_node = env.routes_node[st.route_idx, st.wp_ptr]
-    is_junc = env.routes_junc[st.route_idx, st.wp_ptr]
-    near_junc = is_junc & (dist < env.junc_zone)
-    same = valid & (cur_node[cand] == cur_node[:, None]) & (cur_node[:, None] >= 0)
-    has_priority = same & near_junc[:, None] & near_junc[cand] & (dist[cand] < dist[:, None])
-    should_yield = near_junc & jnp.any(has_priority, axis=1)
-    yield_pen = (should_yield & (speed > env.idle_speed)).astype(jnp.float32)
 
     # respawn cars that finished a trip OR crashed (a crash clears, not freezes)
     respawn = new_goal | crash_event
@@ -306,16 +300,12 @@ def step(env: Env, st: State, action: jnp.ndarray, key: jax.Array):
     crashes = st.crashes + crash_event.astype(jnp.int32)
     ped_pos, ped_dir = _ped_step(env, st, kped)
 
-    idle_pen = (speed < env.idle_speed)
-    reward = (
-        env.w_progress * progress
-        - env.w_idle * idle_pen.astype(jnp.float32)
-        - env.w_prox * prox_pen - env.w_ped_prox * ped_prox
-        - env.w_yield * yield_pen
-        - env.w_collision * car_crash.astype(jnp.float32)
-        - env.w_ped * ped_hit.astype(jnp.float32)
-        + env.w_goal * new_goal.astype(jnp.float32)
-    )
+    # CMDP reward (§9): efficiency only — progress along route, arrival bonus, and a
+    # small per-step time cost. Crash/lane/proximity constraints are scored by the
+    # verifier's cost channel (rl/verifier.cost_signal), never folded in here.
+    reward = (env.w_progress * progress
+              + env.w_goal * new_goal.astype(jnp.float32)
+              - env.w_time)
 
     t = st.t + 1
     nst = State(pos=pos, heading=heading, speed=speed, route_idx=route_idx,

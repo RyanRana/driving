@@ -5,7 +5,7 @@ No randomness, no wall-clock, no network, no physics replay, no env import.
 """
 import numpy as np
 
-from smoothride.rl.verifier import CarVerdict, RunVerdict, verify
+from smoothride.rl.verifier import CarVerdict, RunVerdict, cost_signal, verify
 
 LW = 3.5
 
@@ -127,6 +127,33 @@ def test_returns_run_and_car_verdict_types(make_trace):
     assert isinstance(v, RunVerdict)
     assert len(v.per_car) == 2
     assert all(isinstance(c, CarVerdict) for c in v.per_car)
+
+
+def test_cost_signal_is_per_step_and_fires_on_violations(make_trace):
+    # car 0 clean; car 1 crashes at step 1; car 2 driven 10 m off-lane every step.
+    crashed = np.zeros((3, 3), bool)
+    crashed[1, 1] = True
+    pos = np.zeros((3, 3, 2), np.float32)
+    pos[..., 1] = -3.5 * 0.5            # cars 0,1 on lane-0 centerline
+    pos[:, 2, 1] = 10.0                 # car 2 off-road
+    cost = cost_signal(make_trace(n_steps=3, n_agents=3, pos=pos, crashed=crashed))
+    assert cost.shape == (3, 3)
+    assert cost[:, 0].sum() == 0.0      # clean car never costs
+    assert cost[1, 1] == 1.0           # crash step
+    assert cost[0, 1] == 0.0           # car 1 fine before the crash
+    assert np.all(cost[:, 2] == 1.0)   # off-lane every step
+
+
+def test_cost_signal_matches_verify_validity(make_trace):
+    # a car is valid iff its per-step cost is zero at every step (one rulebook).
+    pos = np.zeros((4, 2, 2), np.float32)
+    pos[..., 1] = -3.5 * 0.5
+    pos[:, 1, 1] = 10.0                 # car 1 off-lane
+    tr = make_trace(n_steps=4, n_agents=2, pos=pos)
+    cost = cost_signal(tr)
+    v = verify(tr)
+    for i, c in enumerate(v.per_car):
+        assert c.valid == (cost[:, i].sum() == 0.0)
 
 
 def test_verifier_module_does_not_import_env():
