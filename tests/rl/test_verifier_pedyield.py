@@ -109,6 +109,17 @@ def test_empty_ped_array_returns_zeros() -> None:
     assert np.all(result == 0.0)
 
 
+def test_cost_signal_includes_ped_yield(make_trace):
+    # a car at origin moving at cruise speed, a crossing ped 4 m away -> cost > lane terms
+    trace = make_trace(n_steps=1, n_agents=1, n_peds=1,
+                       pos=[[[0.0, 0.0]]], speed=[[7.0]],
+                       ped_pos=[[[4.0, 0.0]]], ped_crossing=[[True]])
+    from smoothride.rl.verifier import cost_signal
+    c = cost_signal(trace)
+    assert c.shape == (1, 1)
+    assert c[0, 0] > 0.5   # ped-yield term present and large
+
+
 def test_step_cost_raises_when_ped_pos_without_ped_crossing() -> None:
     """step_cost must fail fast when ped_pos is given but ped_crossing is None."""
     T, N = 2, 1

@@ -226,4 +226,5 @@ def cost_signal(trace: Trace) -> np.ndarray:
     PPO. Same predicates as `verify()`, reduced per step instead of per car."""
     return step_cost(trace.pos, trace.seg_start, trace.seg_end, trace.lane_count,
                      trace.lane_width, trace.heading, trace.speed, trace.spawn_grace,
-                     trace.crashed, trace.speed_limit)
+                     trace.crashed, trace.speed_limit,
+                     ped_pos=trace.ped_pos, ped_crossing=trace.ped_crossing)

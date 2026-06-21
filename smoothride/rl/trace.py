@@ -65,6 +65,9 @@ class Trace:
     speed_limit: np.ndarray     # (T, N) m/s — edge limit under each car
     collision_radius: float
     lane_width: float           # meters — lane offset geometry
+    # pedestrian timelines, shape (T, M) / (T, M, 2)
+    ped_pos: np.ndarray         # (T, M, 2) meters
+    ped_crossing: np.ndarray    # (T, M) bool — ped is in its crossing leg
 
     @property
     def n_steps(self) -> int:
@@ -89,3 +92,11 @@ class Trace:
         if self.action.shape != (T, N, 3):
             raise ValueError(
                 f"trace.action must have shape {(T, N, 3)}, got {self.action.shape}")
+        M = self.manifest.n_peds
+        if self.ped_pos.shape != (T, M, 2):
+            raise ValueError(
+                f"trace.ped_pos must have shape {(T, M, 2)}, got {self.ped_pos.shape}")
+        if self.ped_crossing.shape != (T, M):
+            raise ValueError(
+                f"trace.ped_crossing must have shape {(T, M)}, "
+                f"got {self.ped_crossing.shape}")
