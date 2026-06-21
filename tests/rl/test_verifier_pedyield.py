@@ -5,7 +5,7 @@ TDD: these tests are written BEFORE the implementation.
 import numpy as np
 import pytest
 
-from smoothride.rl.verifier import ped_yield_cost, step_cost
+from smoothride.rl.verifier import cost_signal, ped_yield_cost, step_cost
 
 
 def _one(
@@ -111,13 +111,14 @@ def test_empty_ped_array_returns_zeros() -> None:
 
 def test_cost_signal_includes_ped_yield(make_trace):
     # a car at origin moving at cruise speed, a crossing ped 4 m away -> cost > lane terms
+    # prox = (r_yield - dist) / (r_yield - r_ped) = (9 - 4) / (9 - 3.5) = 5/5.5 ≈ 0.909
+    # speed_factor = speed / cruise_cap = 7.0 / 7.0 = 1.0 → ped_yield_cost ≈ 0.909
     trace = make_trace(n_steps=1, n_agents=1, n_peds=1,
                        pos=[[[0.0, 0.0]]], speed=[[7.0]],
                        ped_pos=[[[4.0, 0.0]]], ped_crossing=[[True]])
-    from smoothride.rl.verifier import cost_signal
     c = cost_signal(trace)
     assert c.shape == (1, 1)
-    assert c[0, 0] > 0.5   # ped-yield term present and large
+    assert 0.85 < c[0, 0] < 0.95   # ped-yield term: prox≈0.909, speed_factor=1.0
 
 
 def test_step_cost_raises_when_ped_pos_without_ped_crossing() -> None:

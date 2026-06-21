@@ -53,13 +53,15 @@ def make_trace():
             arrived=np.zeros((T, N), bool),
             speed_limit=np.full((T, N), 1e9, np.float32),
         )
-        # Convert any list overrides to numpy arrays matching original field dtype
-        for k, v in overrides.items():
-            if isinstance(v, list):
-                orig = fields.get(k)
-                dtype = orig.dtype if orig is not None else np.float32
-                overrides[k] = np.asarray(v, dtype)
-        fields.update(overrides)
+        # Convert any list overrides to numpy arrays matching original field dtype.
+        # Build a NEW dict instead of mutating overrides during iteration.
+        converted_overrides = {
+            k: np.asarray(v, fields[k].dtype if k in fields else np.float32)
+            if isinstance(v, list)
+            else v
+            for k, v in overrides.items()
+        }
+        fields.update(converted_overrides)
         manifest = TraceManifest(
             run_id="test-run", seed=0, scenario_id="test", policy_checkpoint_id="ckpt",
             config_hash="hash", dt=dt, n_steps=T, n_agents=N, n_peds=M,
