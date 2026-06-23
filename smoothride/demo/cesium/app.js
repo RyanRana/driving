@@ -12,7 +12,7 @@ const TOKEN = new URLSearchParams(location.search).get("ionToken")
   || DEFAULT_ION_TOKEN;
 
 const SF = { lon: -122.4090, lat: 37.7886 };
-const TRAJ_URL = "../web/public/trajectories.json";
+const TRAJ_URL = "./public/trajectories.json";
 const AMBER = Cesium.Color.fromCssColorString("#f59e0b").withAlpha(0.5);
 
 // Image pasted onto building facades. Drop a file next to index.html and set its
