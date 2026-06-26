@@ -12,6 +12,7 @@ human limitations. Nomos rips them out and learns the **behavioral layer** inste
 a whole fleet shares the real San Francisco road graph without a central controller and
 without crashing. Low-level autonomy (perception, throttle/brake/steer) is assumed
 solved; the one irreducible human element is **pedestrians**, whom cars must yield to.
+
 ---
 
 ## The RL, in brief
