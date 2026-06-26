@@ -1,14 +1,5 @@
 # Nomos — reinforcement-learned traffic coordination for a driverless San Francisco
 
-> *nomos* (νόμος) — Greek for "law." When every car is autonomous, the law of the
-> road stops being painted lines and signal timing and becomes a *learned* policy.
-
-When every vehicle drives itself, traffic lights and lane law are legacy overhead for
-human limitations. Nomos rips them out and learns the **behavioral layer** instead — how
-a whole fleet shares the real San Francisco road graph without a central controller and
-without crashing. Low-level autonomy (perception, throttle/brake/steer) is assumed
-solved; the one irreducible human element is **pedestrians**, whom cars must yield to.
-
 ![Nomos — orbiting the trained fleet over downtown San Francisco](docs/media/nomos-aerial.gif)
 
 ![Nomos — street-level dolly through the fleet](docs/media/nomos-street-dolly.gif)
@@ -16,6 +7,11 @@ solved; the one irreducible human element is **pedestrians**, whom cars must yie
 *The trained policy driving the live [Cesium viewer](smoothride/demo/cesium/) on the real
 SF grid — 172 cars, per-car colors, building facades, and a live telemetry dashboard.*
 
+When every vehicle drives itself, traffic lights and lane law are legacy overhead for
+human limitations. Nomos rips them out and learns the **behavioral layer** instead — how
+a whole fleet shares the real San Francisco road graph without a central controller and
+without crashing. Low-level autonomy (perception, throttle/brake/steer) is assumed
+solved; the one irreducible human element is **pedestrians**, whom cars must yield to.
 ---
 
 ## The RL, in brief
